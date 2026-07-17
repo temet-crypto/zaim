@@ -1,0 +1,44 @@
+# ═══════════════════════════════════════════════════════════
+# ZAIM Docker Compose — Lite (No Local Node)
+#
+# Uses ChainSafe's public lightwalletd proxy instead of
+# running a full zcashd + lightwalletd stack locally.
+# Much cheaper to run, ideal for development & initial launch.
+#
+# Services:
+#   zaim-web — React app served by Nginx (port 80/443)
+#
+# The WASM wallet connects directly to:
+#   https://zcash-mainnet.chainsafe.dev (gRPC-web proxy)
+# ═══════════════════════════════════════════════════════════
+
+version: "3.8"
+
+services:
+  zaim-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: zaim-web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/zaim.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    networks:
+      - zaim-net
+
+  certbot:
+    image: certbot/certbot
+    container_name: zaim-certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+networks:
+  zaim-net:
+    driver: bridge

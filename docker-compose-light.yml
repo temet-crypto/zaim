@@ -1,0 +1,35 @@
+version: "3.8"
+services:
+  zaim-api:
+    image: zaim-zingo-api:latest
+    container_name: zaim-api
+    environment:
+      - LIGHTWALLETD_SERVER=https://lwdv3.zecwallet.co:443
+      - WALLET_DIR=/app/wallets
+      - ZECWALLET_CLI=/app/zingo-cli
+    volumes:
+      - wallet-data:/app/wallets
+    ports:
+      - "8000:8000"
+    networks:
+      - zaim-net
+
+  zaim-web:
+    image: nginx:alpine
+    container_name: zaim-web
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./dist:/usr/share/nginx/html:ro
+      - ./nginx/zaim.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - zaim-api
+    networks:
+      - zaim-net
+
+volumes:
+  wallet-data:
+
+networks:
+  zaim-net:

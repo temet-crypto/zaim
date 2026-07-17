@@ -1,0 +1,56 @@
+services:
+  zcashd:
+    image: electriccoinco/zcashd:latest
+    container_name: zaim-zcashd
+    restart: unless-stopped
+    volumes:
+      - zcashd-data:/srv/zcashd
+      - ./zcash-data:/srv/zcashd/.zcash
+    healthcheck:
+      test: ["CMD", "zcash-cli", "-rpcuser=zaim", "-rpcpassword=zaim-rpc-secret", "getinfo"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 600s
+    networks:
+      - zaim-net
+
+  zaim-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: zaim-api
+    restart: unless-stopped
+    environment:
+      - ZCASH_RPC_URL=http://zcashd:8232
+      - ZCASH_RPC_USER=zaim
+      - ZCASH_RPC_PASS=zaim-rpc-secret
+      - API_SECRET=zaim-api-secret-change-in-prod
+    depends_on:
+      zcashd:
+        condition: service_healthy
+    networks:
+      - zaim-net
+
+  zaim-web:
+    image: nginx:alpine
+    container_name: zaim-web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./dist:/usr/share/nginx/html:ro
+      - ./nginx/zaim-full.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - zaim-api
+    networks:
+      - zaim-net
+
+volumes:
+  zcashd-data:
+    driver: local
+
+networks:
+  zaim-net:
+    driver: bridge

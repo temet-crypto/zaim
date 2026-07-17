@@ -1,0 +1,13 @@
+FROM python:3.12-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y wget unzip && rm -rf /var/lib/apt/lists/*
+RUN wget -q https://github.com/adityapk00/zecwallet-light-cli/releases/download/v1.8.0-beta2/linux-zecwallet-cli-v1.8.0-beta2.zip -O /tmp/zecwallet.zip && unzip /tmp/zecwallet.zip -d /tmp/zec && find /tmp/zec -name 'zecwallet-cli' -exec mv {} /app/zecwallet-cli \; && chmod +x /app/zecwallet-cli && rm -rf /tmp/zecwallet.zip /tmp/zec
+COPY api/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY api/ ./api/
+RUN mkdir -p /app/wallets
+ENV ZECWALLET_CLI=/app/zecwallet-cli
+ENV WALLET_DIR=/app/wallets
+ENV LIGHTWALLETD_SERVER=https://lwdv3.zecwallet.co
+EXPOSE 8000
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

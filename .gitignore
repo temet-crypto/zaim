@@ -1,0 +1,8 @@
+node_modules/
+dist/
+wallets/
+data/
+zcash-data/
+certbot/
+*.log
+.env*
