@@ -49,7 +49,10 @@ const STATUS_META = {
   REFUNDED: { color: T.red, text: "refunded" },
   FAILED: { color: T.red, text: "failed" },
   EXPIRED: { color: T.red, text: "quote expired" },
+  CANCELLED: { color: T.black, text: "cancelled · nothing moved" },
 };
+
+const TERMINAL = ["SUCCESS", "REFUNDED", "FAILED", "EXPIRED", "CANCELLED"];
 
 const Back = ({ onClick }) => (
   <button onClick={onClick} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", display: "flex" }} aria-label="Back">
@@ -78,7 +81,7 @@ function QuotePanel({ quote }) {
       <div className="mp-cell"><div className="mp-cell-key">YOU GET ≈</div><div className="mp-cell-val" style={{ fontSize: 17, color: T.teal }}>{quote.amount_out}</div></div>
       <div className="mp-cell"><div className="mp-cell-key">IN · USD</div><div className="mp-cell-val" style={{ fontSize: 15 }}>${Number(quote.amount_in_usd || 0).toFixed(2)}</div></div>
       <div className="mp-cell"><div className="mp-cell-key">OUT · USD</div><div className="mp-cell-val" style={{ fontSize: 15 }}>${Number(quote.amount_out_usd || 0).toFixed(2)}</div></div>
-      <div className="mp-cell"><div className="mp-cell-key">EST TIME</div><div className="mp-cell-val" style={{ fontSize: 15 }}>{quote.time_estimate_sec ? `~${quote.time_estimate_sec}s` : "—"}</div></div>
+      <div className="mp-cell"><div className="mp-cell-key">EST TIME</div><div className="mp-cell-val" style={{ fontSize: 15 }}>{quote.time_estimate_sec ? `~${quote.time_estimate_sec}s` : "···"}</div></div>
       <div className="mp-cell"><div className="mp-cell-key">SLIPPAGE</div><div className="mp-cell-val" style={{ fontSize: 15 }}>1%</div></div>
     </div>
   );
@@ -107,14 +110,14 @@ export default function ZaimSwap({ onBack }) {
 
   // Poll the active swap while it's non-terminal and the tab is visible.
   useEffect(() => {
-    if (!swap || ["SUCCESS", "REFUNDED", "FAILED", "EXPIRED"].includes(swap.status)) return;
+    if (!swap || TERMINAL.includes(swap.status)) return;
     if (swap.status === "READY_TO_SEND") return; // nothing to poll until executed
     const tick = async () => {
       if (document.visibilityState !== "visible") return;
       try {
         const r = await api.get(`/swap/status/${swap.id}`);
         if (r.swap) setSwap(r.swap);
-        if (r.swap && ["SUCCESS", "REFUNDED", "FAILED"].includes(r.swap.status)) loadHistory();
+        if (r.swap && TERMINAL.includes(r.swap.status)) loadHistory();
       } catch (e) { }
     };
     pollRef.current = setInterval(tick, 10000);
@@ -160,6 +163,15 @@ export default function ZaimSwap({ onBack }) {
     setLoading(false);
   };
 
+  const cancelSwap = async () => {
+    setError(""); setLoading(true);
+    try {
+      const r = await api.post("/swap/cancel", { swap_id: swap.id });
+      setSwap(r.swap); loadHistory();
+    } catch (e) { setError(e.message); }
+    setLoading(false);
+  };
+
   const copyDeposit = () => {
     navigator.clipboard?.writeText(swap.deposit_address);
     setCopied(true); setTimeout(() => setCopied(false), 1600);
@@ -168,7 +180,8 @@ export default function ZaimSwap({ onBack }) {
   // ── active swap view ──────────────────────────────────────────────────────
   if (swap) {
     const q = swap.quote || {};
-    const terminal = ["SUCCESS", "REFUNDED", "FAILED", "EXPIRED"].includes(swap.status);
+    const terminal = TERMINAL.includes(swap.status);
+    const minsLeft = q.deadline ? Math.max(0, Math.round((new Date(q.deadline).getTime() - Date.now()) / 60000)) : null;
     return (
       <div className="mp-scroll">
         <div className="mp-head"><div style={{ display: "flex", alignItems: "center", gap: 12 }}><Back onClick={() => { reset(); onBack(); }} /><div className="mp-title">Swap</div></div></div>
@@ -189,7 +202,7 @@ export default function ZaimSwap({ onBack }) {
               <button className="mp-link" style={{ marginTop: 8 }} onClick={copyDeposit}>{copied ? "COPIED" : "TAP TO COPY ADDRESS"}</button>
             </div>
             <div className="mp-band">
-              <div className="mp-quip">send from any wallet you control. the quote dies at {String(q.deadline || "").replace("T", " ").slice(0, 16)} utc — after that, funds bounce back to your refund address.</div>
+              <div className="mp-quip">send from any wallet you control. this quote expires in {minsLeft == null ? "a few" : minsLeft} min. an unpaid quote simply lapses, and a late deposit refunds to your address.</div>
             </div>
           </>
         )}
@@ -208,7 +221,7 @@ export default function ZaimSwap({ onBack }) {
             <Err msg={error} />
             <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
               <button className="mp-btn" onClick={execute} disabled={loading}>{loading ? "SENDING…" : `SEND ${q.amount_in} ZEC NOW`}</button>
-              <button className="mp-btn ghost" onClick={reset} disabled={loading}>CANCEL</button>
+              <button className="mp-btn ghost" onClick={cancelSwap} disabled={loading}>CANCEL THIS SWAP</button>
             </div>
           </>
         )}
@@ -234,7 +247,7 @@ export default function ZaimSwap({ onBack }) {
                 </>
               ) : (
                 <div className="mp-quip">
-                  {swap.status === "REFUNDED" ? "the swap did not complete. funds were returned to the refund address." : "the swap did not complete. nothing further will move."}
+                  {swap.status === "CANCELLED" ? "cancelled. nothing moved." : swap.status === "REFUNDED" ? "the swap did not complete. funds were returned to the refund address." : "the swap did not complete. nothing further will move."}
                 </div>
               )}
             </div>
@@ -243,7 +256,13 @@ export default function ZaimSwap({ onBack }) {
         )}
 
         {!terminal && swap.direction === "buy" && (
-          <div style={{ padding: 16 }}><button className="mp-btn ghost" onClick={reset}>START OVER</button></div>
+          <>
+            <Err msg={error} />
+            <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+              <button className="mp-btn danger" onClick={cancelSwap} disabled={loading}>{loading ? "…" : "CANCEL THIS SWAP"}</button>
+              <button className="mp-btn ghost" onClick={reset} disabled={loading}>BACK</button>
+            </div>
+          </>
         )}
       </div>
     );

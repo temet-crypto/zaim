@@ -393,7 +393,7 @@ async def health():
 @app.post("/api/wallet/create")
 async def create_wallet(req: CreateReq):
     if not valid_username(req.username):
-        raise HTTPException(400, detail="Invalid username (3-64 chars: letters, digits, . _ @ -)")
+        raise HTTPException(400, detail="Invalid username (3 to 64 characters: letters, digits, . _ @ and dash)")
     if not req.password or len(req.password) < 8:
         raise HTTPException(400, detail="Password must be at least 8 characters")
     if req.username in users:
@@ -444,7 +444,7 @@ async def create_wallet(req: CreateReq):
 @app.post("/api/wallet/recover")
 async def recover_wallet(req: RecoverReq):
     if not valid_username(req.username):
-        raise HTTPException(400, detail="Invalid username (3-64 chars: letters, digits, . _ @ -)")
+        raise HTTPException(400, detail="Invalid username (3 to 64 characters: letters, digits, . _ @ and dash)")
     if not req.password or len(req.password) < 8:
         raise HTTPException(400, detail="Password must be at least 8 characters")
     if req.username in users:
@@ -838,7 +838,7 @@ async def aintents(path, body=None, params=None):
 # message is surfaced verbatim to the user.
 SWAP_ADDR_RE = re.compile(r"^[A-Za-z0-9:_.-]{10,120}$")
 
-TERMINAL_SWAP_STATES = ("SUCCESS", "REFUNDED", "FAILED", "EXPIRED")
+TERMINAL_SWAP_STATES = ("SUCCESS", "REFUNDED", "FAILED", "EXPIRED", "CANCELLED")
 
 class SwapQuoteReq(BaseModel):
     direction: str                 # "buy" (asset → ZEC) | "sell" (ZEC → asset)
@@ -849,6 +849,9 @@ class SwapQuoteReq(BaseModel):
     dry: bool = True
 
 class SwapExecuteReq(BaseModel):
+    swap_id: str
+
+class SwapCancelReq(BaseModel):
     swap_id: str
 
 def _to_base_units(amount_str, decimals):
@@ -895,7 +898,7 @@ async def swap_quote(req: SwapQuoteReq, session=Depends(get_session)):
         raise HTTPException(400, detail="unknown asset")
     t_addr = user.get("t_address", "")
     if not t_addr:
-        raise HTTPException(400, detail="wallet has no transparent address yet — try again in a minute")
+        raise HTTPException(400, detail="wallet has no transparent address yet. try again in a minute")
 
     from datetime import timedelta, timezone as _tz
     deadline = (datetime.now(_tz.utc) + timedelta(minutes=SWAP_DEADLINE_MIN)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -970,7 +973,7 @@ async def swap_execute(req: SwapExecuteReq, session=Depends(get_session)):
     if not rec or rec.get("user_id") != session["user_id"]:
         raise HTTPException(404, detail="swap not found")
     if rec.get("direction") != "sell":
-        raise HTTPException(400, detail="only sell swaps execute server-side")
+        raise HTTPException(400, detail="only sell swaps execute on the server")
     if rec.get("status") != "READY_TO_SEND":
         raise HTTPException(409, detail=f"swap is {rec.get('status')}")
     if rec.get("deposit_memo"):
@@ -984,7 +987,7 @@ async def swap_execute(req: SwapExecuteReq, session=Depends(get_session)):
         rec["status"] = "EXPIRED"
         rec["updated"] = time.time()
         save_swaps()
-        raise HTTPException(409, detail="quote expired — get a fresh one")
+        raise HTTPException(409, detail="quote expired. get a fresh one")
 
     wn = session["wallet_name"]
     zats = int(rec["amount_units"])
@@ -1008,7 +1011,7 @@ async def swap_execute(req: SwapExecuteReq, session=Depends(get_session)):
         # broadcast — refuse loudly and keep the swap READY_TO_SEND so a
         # funded retry can still use it. Never record a send that didn't
         # happen (the MAXPAIN phantom-close lesson).
-        raise HTTPException(400, detail="send failed — nothing broadcast: "
+        raise HTTPException(400, detail="send failed, nothing broadcast: "
                             + (err_text or "wallet returned no txid"))
     rec["status"] = "DEPOSIT_SENT"
     rec["txid"] = txid
@@ -1021,6 +1024,44 @@ async def swap_execute(req: SwapExecuteReq, session=Depends(get_session)):
                            body={"txHash": rec["txid"], "depositAddress": rec["deposit_address"]})
         except Exception:
             pass
+    return {"swap": rec}
+
+@app.post("/api/swap/cancel")
+async def swap_cancel(req: SwapCancelReq, session=Depends(get_session)):
+    """Mark an unfunded swap CANCELLED. Only allowed while nothing has moved:
+    buys before any deposit is detected, sells before execute. Cancel is a
+    local bookkeeping state. The upstream quote simply lapses unpaid at its
+    deadline. If someone pays a cancelled buy quote anyway, the ZEC still
+    lands at the user's own address."""
+    rec = swaps.get(req.swap_id)
+    if not rec or rec.get("user_id") != session["user_id"]:
+        raise HTTPException(404, detail="swap not found")
+    if rec.get("status") in TERMINAL_SWAP_STATES:
+        return {"swap": rec}
+    if rec.get("direction") == "sell":
+        if rec.get("status") != "READY_TO_SEND":
+            raise HTTPException(409, detail=f"cannot cancel while {rec.get('status')}")
+    else:
+        if rec.get("status") not in ("AWAITING_DEPOSIT", "PENDING_DEPOSIT"):
+            raise HTTPException(409, detail=f"cannot cancel while {rec.get('status')}")
+        # Live check upstream: if a deposit was already seen, it is too late.
+        try:
+            st = await aintents("/v0/status", params={"depositAddress": rec["deposit_address"]})
+            remote = st.get("status", "")
+            if remote and remote != "PENDING_DEPOSIT":
+                rec["status"] = remote
+                rec["updated"] = time.time()
+                save_swaps()
+                raise HTTPException(409, detail="a deposit was already detected. the swap will complete or refund on its own")
+        except HTTPException as e:
+            if e.status_code == 409:
+                raise
+            # service hiccup: an unpaid quote is still safe to cancel
+        except Exception:
+            pass
+    rec["status"] = "CANCELLED"
+    rec["updated"] = time.time()
+    save_swaps()
     return {"swap": rec}
 
 @app.get("/api/swap/list")

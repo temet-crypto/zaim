@@ -70,7 +70,7 @@ export default function AdminDashboard({ onExit }) {
   );
 
   const StatCell = ({ label, value }) => (
-    <div className="mp-cell"><div className="mp-cell-key">{label}</div><div className="mp-cell-val" style={{ fontSize: 40 }}>{value ?? "—"}</div></div>
+    <div className="mp-cell"><div className="mp-cell-key">{label}</div><div className="mp-cell-val" style={{ fontSize: 40 }}>{value ?? "···"}</div></div>
   );
   const DelBtn = ({ onClick }) => (
     <button onClick={onClick} style={{ fontFamily: F.mono, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: T.white, background: T.signout, border: `2px solid ${T.black}`, padding: "6px 12px", cursor: "pointer", whiteSpace: "nowrap" }}>DELETE</button>
@@ -113,8 +113,8 @@ export default function AdminDashboard({ onExit }) {
                 {u.is_admin && <span className="mp-tag teal">ADMIN</span>}
               </div>
               <div style={{ fontFamily: F.mono, fontSize: 10, marginTop: 6 }}>{u.geovault_count} VAULTS · {u.contact_count} CONTACTS</div>
-              <div className="mp-mono" style={{ fontSize: 10, marginTop: 6 }}>z: {u.z_address || "—"}</div>
-              <div className="mp-mono" style={{ fontSize: 10, marginTop: 3 }}>t: {u.t_address || "—"}</div>
+              <div className="mp-mono" style={{ fontSize: 10, marginTop: 6 }}>z: {u.z_address || "···"}</div>
+              <div className="mp-mono" style={{ fontSize: 10, marginTop: 3 }}>t: {u.t_address || "···"}</div>
             </div>
             <DelBtn onClick={() => deleteUser(u.username)} />
           </div>

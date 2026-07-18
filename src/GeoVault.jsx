@@ -24,7 +24,7 @@ function windowPct(start, end, now) {
   return Math.round(((now - s) / (e - s)) * 100);
 }
 function fmtDate(str) {
-  if (!str) return "—";
+  if (!str) return "···";
   return parseT(str).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
@@ -214,7 +214,7 @@ function CreateVault({ onBack, onCreate }) {
         {step === 1 && <>
           <div className="mp-band-blue" style={{ padding: 14, border: `2px solid ${T.black}` }}>
             <div style={{ fontFamily: F.mono, fontSize: 10, letterSpacing: 1, color: T.white, textTransform: "uppercase", marginBottom: 4 }}>AVAILABILITY WINDOW</div>
-            <div style={{ fontFamily: F.body, fontSize: 12, color: T.white, lineHeight: 1.5 }}>Only claimable inside this window. Before open → blocked. After close → ZEC auto-returns.</div>
+            <div style={{ fontFamily: F.body, fontSize: 12, color: T.white, lineHeight: 1.5 }}>Only claimable inside this window. Before open → blocked. After close → ZEC returns automatically.</div>
           </div>
           <div><label style={lbl}>OPEN · START</label><input type="datetime-local" className="mp-input" style={{ colorScheme: "light" }} value={form.timeStart} onChange={e => up("timeStart", e.target.value)} /></div>
           <div><label style={lbl}>CLOSE · END</label><input type="datetime-local" className="mp-input" style={{ colorScheme: "light" }} value={form.timeEnd} onChange={e => up("timeEnd", e.target.value)} /></div>
@@ -234,7 +234,7 @@ function CreateVault({ onBack, onCreate }) {
           </div>
           <div style={{ border: `2px solid ${T.black}`, background: T.blueTint, padding: 12 }}>
             <div style={{ fontFamily: F.mono, fontSize: 9, letterSpacing: 1, textTransform: "uppercase", color: T.blue, marginBottom: 4 }}>ESCROW + TIME LOCK</div>
-            <div style={{ fontFamily: F.body, fontSize: 12, lineHeight: 1.5 }}>ZEC held in escrow until claimed. Unclaimed by {fmtDate(form.timeEnd) || "close"} → auto-returns.</div>
+            <div style={{ fontFamily: F.body, fontSize: 12, lineHeight: 1.5 }}>ZEC held in escrow until claimed. Unclaimed by {fmtDate(form.timeEnd) || "close"} → returns automatically.</div>
           </div>
         </>}
         {step === 3 && <>
@@ -252,7 +252,7 @@ function CreateVault({ onBack, onCreate }) {
           {form.walletMode === "specific" && <div><label style={lbl}>TARGET WALLET</label><input className="mp-input" placeholder="zs1…" value={form.wallet} onChange={e => up("wallet", e.target.value)} /></div>}
           <div className="mp-band mp-band-w" style={{ border: `2px solid ${T.black}` }}>
             <div style={{ fontFamily: F.mono, fontSize: 9, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 10 }}>VAULT SUMMARY</div>
-            {[["Label", form.label || "—"], ["Location", form.lat && form.lng ? `${(+form.lat).toFixed(4)}, ${(+form.lng).toFixed(4)}` : "—"], ["Radius", `${form.radius}m`], ["Opens", fmtDate(form.timeStart)], ["Closes", fmtDate(form.timeEnd)], ["ZEC", form.zec ? `${form.zec} ZEC` : "—"], ["Message", form.message ? `${form.message.length} bytes` : "None"], ["Access", form.walletMode === "any" ? "Open to all" : "Wallet gated"]].map(([k, v]) => (
+            {[["Label", form.label || "···"], ["Location", form.lat && form.lng ? `${(+form.lat).toFixed(4)}, ${(+form.lng).toFixed(4)}` : "···"], ["Radius", `${form.radius}m`], ["Opens", fmtDate(form.timeStart)], ["Closes", fmtDate(form.timeEnd)], ["ZEC", form.zec ? `${form.zec} ZEC` : "···"], ["Message", form.message ? `${form.message.length} bytes` : "None"], ["Access", form.walletMode === "any" ? "Open to all" : "Wallet gated"]].map(([k, v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${T.faint}`, fontFamily: F.mono, fontSize: 12 }}>
                 <span>{k}</span><span style={{ color: k === "Opens" ? T.teal : k === "Closes" ? T.red : T.black }}>{v}</span>
               </div>

@@ -154,7 +154,7 @@ function HomeScreen({ onNav }) {
     return () => { alive = false; clearInterval(poll); clearInterval(tick); };
   }, []);
   const fmtAgo = (updatedAt) => {
-    if (!updatedAt) return "—";
+    if (!updatedAt) return "···";
     const s = Math.max(0, Math.floor(now / 1000 - updatedAt));
     if (s < 60) return `${s}s ago`;
     if (s < 3600) return `${Math.floor(s / 60)}m ago`;
@@ -201,7 +201,7 @@ function HomeScreen({ onNav }) {
       </div>
       <div className="mp-band mp-band-w" style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between" }}>
         <div>
-          <div className="mp-big" style={{ fontSize: 40 }}>{usd != null ? fmtUsd(usd) : "—"}</div>
+          <div className="mp-big" style={{ fontSize: 40 }}>{usd != null ? fmtUsd(usd) : "···"}</div>
           <div className="mp-lbl-sm" style={{ marginTop: 6 }}>ZCASH · COINGECKO</div>
         </div>
         {chg != null && (
@@ -274,7 +274,7 @@ function SendScreen({ onBack }) {
     <div className="mp-scroll">
       <div className="mp-head"><div style={{ display: "flex", alignItems: "center", gap: 12 }}><BackArrow onClick={onBack} /><div className="mp-title">Send ZEC</div></div></div>
       <div className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>TO ADDRESS</div><input className="mp-input" value={to} onChange={e => setTo(e.target.value)} placeholder="z-address or unified address" /></div>
+        <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>TO ADDRESS</div><input className="mp-input" value={to} onChange={e => setTo(e.target.value)} placeholder="shielded or unified address" /></div>
         <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>AMOUNT · ZEC</div><input className="mp-input" type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.0000" /></div>
         <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>MEMO · OPTIONAL</div><input className="mp-input" value={memo} onChange={e => setMemo(e.target.value)} placeholder="encrypted on-chain message" /></div>
         {error && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase", letterSpacing: .5 }}>{error}</div>}
@@ -300,7 +300,7 @@ function MessengerScreen({ onNav }) {
         <div className="mp-band mp-band-w" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <div className="mp-lbl-sm" style={{ color: T.blue }}>NEW CONTACT</div>
           <input className="mp-input" value={nn} onChange={e => setNn(e.target.value)} placeholder="contact name" />
-          <input className="mp-input" value={na} onChange={e => setNa(e.target.value)} placeholder="z-address" />
+          <input className="mp-input" value={na} onChange={e => setNa(e.target.value)} placeholder="shielded address" />
           {err && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase" }}>{err}</div>}
           <button className="mp-btn" onClick={add}>ADD CONTACT</button>
         </div>
@@ -387,7 +387,7 @@ function SettingsScreen({ onLogout, onAdmin }) {
   };
   const getSeedText = () => { if (!seed) return ""; if (typeof seed === "string") return seed; if (seed.seed) return seed.seed; if (seed.raw) return seed.raw; return JSON.stringify(seed); };
   const conn = health?.status === "ok";
-  const srv = health?.server ? health.server.replace("https://", "").replace("http://", "").split(":")[0] : "—";
+  const srv = health?.server ? health.server.replace("https://", "").replace("http://", "").split(":")[0] : "···";
   const KV = ({ k, v, color }) => (<div className="mp-kv"><span className="mp-kv-key">{k}</span><span className="mp-kv-val" style={{ color: color || T.black }}>{v}</span></div>);
   const KVm = ({ k, v, color }) => (<div className="mp-kv"><span className="mp-kv-key">{k}</span><span className="mp-kv-val mono" style={{ color: color || T.black }}>{v}</span></div>);
   return (
@@ -401,11 +401,11 @@ function SettingsScreen({ onLogout, onAdmin }) {
       <KVm k="Network" v="Zcash Mainnet" />
       <div className="mp-section">SECURITY</div>
       <KV k="Encryption" v="E2E SHIELDED" color={T.teal} />
-      <KVm k="Key Storage" v="Server-side · custodial" />
+      <KVm k="Key Storage" v="Server side · custodial" />
       <KV k="Memo Privacy" v="ON-CHAIN" color={T.teal} />
-      <KVm k="Address Type" v="z-addr · shielded" />
+      <KVm k="Address Type" v="z address · shielded" />
       <div className="mp-section">ACCOUNT</div>
-      <KVm k="User" v={localStorage.getItem("zaim_user") || "—"} />
+      <KVm k="User" v={localStorage.getItem("zaim_user") || "···"} />
       <div className="mp-section">RECOVERY</div>
       <div className="mp-band mp-band-w">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
