@@ -1,4 +1,5 @@
 import ZAIMGeoVault from "./GeoVault.jsx";
+import ZaimSwap from "./Swap.jsx";
 import { useState, useEffect, useRef, useCallback } from "react";
 import AdminDashboard from "./AdminDashboard";
 import { T, F, MAXPAIN_CSS } from "./styles/maxpain.js";
@@ -220,7 +221,8 @@ function HomeScreen({ onNav }) {
       </div>
       <div style={{ display: "flex", borderBottom: `2px solid ${T.black}` }}>
         <button className="mp-btn" style={{ borderRight: `2px solid ${T.black}`, borderLeft: "none", borderTop: "none", borderBottom: "none" }} onClick={() => onNav("send")}>SEND</button>
-        <button className="mp-btn ghost" style={{ border: "none" }} onClick={() => { if (address) { navigator.clipboard?.writeText(address); setToast("Address copied"); setTimeout(() => setToast(""), 1800); } }}>COPY ADDRESS</button>
+        <button className="mp-btn" style={{ borderRight: `2px solid ${T.black}`, borderLeft: "none", borderTop: "none", borderBottom: "none", background: T.blue }} onClick={() => onNav("swap")}>SWAP</button>
+        <button className="mp-btn ghost" style={{ border: "none" }} onClick={() => { if (address) { navigator.clipboard?.writeText(address); setToast("Address copied"); setTimeout(() => setToast(""), 1800); } }}>COPY</button>
       </div>
       <div className="mp-section">RECENT TRANSACTIONS</div>
       {txs.length === 0 ? (
@@ -424,7 +426,7 @@ function SettingsScreen({ onLogout, onAdmin }) {
       </div>
       <div style={{ padding: 16 }}><button className="mp-btn danger" onClick={onLogout}>SIGN OUT</button></div>
       <div style={{ padding: "8px 16px 20px", textAlign: "center" }}>
-        <span onClick={onAdmin} className="mp-lbl-sm" style={{ userSelect: "none", cursor: "default", color: T.black, opacity: .5 }}>ZAIM v0.5.0</span>
+        <span onClick={onAdmin} className="mp-lbl-sm" style={{ userSelect: "none", cursor: "default", color: T.black, opacity: .5 }}>ZAIM v0.7.0</span>
       </div>
     </div>
   );
@@ -460,6 +462,7 @@ export default function ZaimApp() {
     switch (screen) {
       case "home": return <HomeScreen onNav={nav} />;
       case "send": return <SendScreen onBack={() => setScreen("home")} />;
+      case "swap": return <ZaimSwap onBack={() => setScreen("home")} />;
       case "messages": return <MessengerScreen onNav={nav} />;
       case "chat": return chatContact ? <ChatScreen contact={chatContact} onBack={() => setScreen("messages")} /> : null;
       case "geo": return <ZAIMGeoVault />;
@@ -468,7 +471,7 @@ export default function ZaimApp() {
       default: return <HomeScreen onNav={nav} />;
     }
   };
-  const showNav = authed && !["send", "chat", "admin"].includes(screen);
+  const showNav = authed && !["send", "swap", "chat", "admin"].includes(screen);
   return (
     <div className="mp mp-shell">
       <style>{MAXPAIN_CSS}</style>

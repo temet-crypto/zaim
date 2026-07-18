@@ -1,6 +1,6 @@
 """
 ZAIM Backend API - FastAPI + zecwallet-cli v1.8 (Zcash Light Client)
-v0.6.0 - Per-wallet isolation, PBKDF2 auth, hardened I/O, send/shield fix + app fee
+v0.7.0 - NEAR Intents swaps (buy/sell ZEC cross-chain) on top of v0.6.0
 
 Notes:
   - Wallets are isolated per user by running the CLI with a per-wallet HOME
@@ -314,6 +314,7 @@ async def startup_sync():
 async def lifespan(app: FastAPI):
     load_users()
     load_sessions()
+    load_swaps()
     sync_task = asyncio.create_task(periodic_sync())
     startup_task = asyncio.create_task(startup_sync())
     price_task = asyncio.create_task(periodic_price())
@@ -322,7 +323,7 @@ async def lifespan(app: FastAPI):
     startup_task.cancel()
     price_task.cancel()
 
-app = FastAPI(title="ZAIM API", version="0.6.0", lifespan=lifespan)
+app = FastAPI(title="ZAIM API", version="0.7.0", lifespan=lifespan)
 # The SPA is served same-origin (nginx proxies /api), so CORS is belt-and-braces.
 # Restrict to the known origins; Bearer tokens are used (no cookies), so credentials are off.
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
@@ -749,6 +750,311 @@ async def delete_vault(vault_id: str, session=Depends(get_session)):
     user["geovaults"] = [v for v in user.get("geovaults", []) if v["id"] != vault_id]
     save_users()
     return {"vaults": user["geovaults"]}
+
+# ─── Swap · NEAR Intents 1Click ──────────────────────────────────────────────
+# Cross-chain swaps in and out of ZEC via the 1Click intent API.
+#   BUY  (asset → ZEC): quote returns a one-time deposit address; the user pays
+#        it from an external wallet; solvers deliver ZEC to the user's
+#        transparent address (the periodic auto-shield then moves it private).
+#   SELL (ZEC → asset): quote first, then /swap/execute sends the user's ZEC to
+#        the quote's deposit address via zecwallet-cli. The deposit address is
+#        ONLY ever read from that user's own stored quote — never from client
+#        input — so execute can't be steered to an arbitrary address.
+
+INTENTS_BASE = os.getenv("ZAIM_INTENTS_BASE", "https://1click.chaindefuser.com")
+INTENTS_KEY = os.getenv("ZAIM_INTENTS_KEY", "")
+# Cloudflare in front of the API rejects default python UAs; send a browser UA.
+INTENTS_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/126 Safari/537.36")
+SWAP_SLIPPAGE_BPS = int(os.getenv("ZAIM_SWAP_SLIPPAGE_BPS", "100"))  # 100 = 1%
+SWAP_DEADLINE_MIN = int(os.getenv("ZAIM_SWAP_DEADLINE_MIN", "30"))
+
+ZEC_ASSET = {"assetId": "nep141:zec.omft.near", "decimals": 8, "chain": "zcash", "symbol": "ZEC"}
+# Asset IDs verified live against GET /v0/tokens on 2026-07-18.
+SWAP_ASSETS = {
+    "BTC":      {"assetId": "nep141:btc.omft.near", "decimals": 8,  "chain": "bitcoin",  "symbol": "BTC"},
+    "ETH":      {"assetId": "nep141:eth.omft.near", "decimals": 18, "chain": "ethereum", "symbol": "ETH"},
+    "SOL":      {"assetId": "nep141:sol.omft.near", "decimals": 9,  "chain": "solana",   "symbol": "SOL"},
+    "USDC":     {"assetId": "nep141:sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near",
+                 "decimals": 6, "chain": "solana", "symbol": "USDC"},
+    "USDC-ETH": {"assetId": "nep141:eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near",
+                 "decimals": 6, "chain": "ethereum", "symbol": "USDC"},
+}
+
+swaps = {}
+SWAPS_FILE = os.path.join(WDIR, "_swaps.json")
+
+def save_swaps():
+    try:
+        _atomic_write_json(SWAPS_FILE, swaps)
+    except Exception as e:
+        print(f"[save_swaps] {e}", flush=True)
+
+def load_swaps():
+    global swaps
+    try:
+        if os.path.exists(SWAPS_FILE):
+            with open(SWAPS_FILE) as f:
+                swaps = json.load(f)
+    except Exception:
+        pass
+
+def _intents_request(path, body=None, params=None):
+    import urllib.request, urllib.parse, urllib.error
+    url = INTENTS_BASE + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    headers = {"Content-Type": "application/json", "Accept": "application/json",
+               "User-Agent": INTENTS_UA}
+    if INTENTS_KEY:
+        # The 1Click signup issues a JWT (Bearer); plain keys go in X-API-Key.
+        if INTENTS_KEY.count(".") == 2:
+            headers["Authorization"] = "Bearer " + INTENTS_KEY
+        else:
+            headers["X-API-Key"] = INTENTS_KEY
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read().decode()).get("message", "")
+        except Exception:
+            msg = ""
+        if isinstance(msg, list):
+            msg = "; ".join(str(m) for m in msg)
+        raise HTTPException(502, detail=f"swap service {e.code}: {msg or 'request rejected'}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, detail=f"swap service unreachable: {e}")
+
+async def aintents(path, body=None, params=None):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: _intents_request(path, body, params))
+
+# Coarse shape check only — 1Click validates addresses per-chain and its error
+# message is surfaced verbatim to the user.
+SWAP_ADDR_RE = re.compile(r"^[A-Za-z0-9:_.-]{10,120}$")
+
+TERMINAL_SWAP_STATES = ("SUCCESS", "REFUNDED", "FAILED", "EXPIRED")
+
+class SwapQuoteReq(BaseModel):
+    direction: str                 # "buy" (asset → ZEC) | "sell" (ZEC → asset)
+    asset: str                     # key in SWAP_ASSETS
+    amount: str                    # human units of the INPUT side
+    refund_address: str = ""       # buy: user's origin-chain address (required)
+    recipient_address: str = ""    # sell: user's destination address (required)
+    dry: bool = True
+
+class SwapExecuteReq(BaseModel):
+    swap_id: str
+
+def _to_base_units(amount_str, decimals):
+    try:
+        d = Decimal(str(amount_str))
+    except Exception:
+        raise HTTPException(400, detail="Invalid amount")
+    if d <= 0:
+        raise HTTPException(400, detail="Amount must be positive")
+    units = int((d * (Decimal(10) ** decimals)).to_integral_value(rounding=ROUND_DOWN))
+    if units <= 0:
+        raise HTTPException(400, detail="Amount too small")
+    return units
+
+def _quote_view(q, fallback_deadline):
+    return {
+        "amount_in": q.get("amountInFormatted"),
+        "amount_in_usd": q.get("amountInUsd"),
+        "amount_out": q.get("amountOutFormatted"),
+        "amount_out_usd": q.get("amountOutUsd"),
+        "min_amount_out": q.get("minAmountOut"),
+        "time_estimate_sec": q.get("timeEstimate"),
+        "deadline": q.get("deadline") or fallback_deadline,
+    }
+
+@app.get("/api/swap/assets")
+async def swap_assets(session=Depends(get_session)):
+    return {
+        "assets": {k: {"chain": v["chain"], "symbol": v["symbol"], "decimals": v["decimals"]}
+                   for k, v in SWAP_ASSETS.items()},
+        "zec_decimals": 8,
+        "slippage_bps": SWAP_SLIPPAGE_BPS,
+    }
+
+@app.post("/api/swap/quote")
+async def swap_quote(req: SwapQuoteReq, session=Depends(get_session)):
+    user = users.get(session["user_id"])
+    if not user:
+        raise HTTPException(404)
+    if req.direction not in ("buy", "sell"):
+        raise HTTPException(400, detail="direction must be buy or sell")
+    asset = SWAP_ASSETS.get(req.asset)
+    if not asset:
+        raise HTTPException(400, detail="unknown asset")
+    t_addr = user.get("t_address", "")
+    if not t_addr:
+        raise HTTPException(400, detail="wallet has no transparent address yet — try again in a minute")
+
+    from datetime import timedelta, timezone as _tz
+    deadline = (datetime.now(_tz.utc) + timedelta(minutes=SWAP_DEADLINE_MIN)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    if req.direction == "buy":
+        # ZEC lands at the user's transparent address; refunds go back to the
+        # external wallet the user pays from.
+        if not req.refund_address or not SWAP_ADDR_RE.match(req.refund_address):
+            raise HTTPException(400, detail="refund address on the origin chain is required")
+        origin, dest = asset, ZEC_ASSET
+        recipient, refund_to = t_addr, req.refund_address
+    else:
+        # ZEC leaves the user's wallet; refunds (if the swap dies) come back to
+        # their own transparent address.
+        if not req.recipient_address or not SWAP_ADDR_RE.match(req.recipient_address):
+            raise HTTPException(400, detail="destination address is required")
+        origin, dest = ZEC_ASSET, asset
+        recipient, refund_to = req.recipient_address, t_addr
+
+    amount_units = _to_base_units(req.amount, origin["decimals"])
+    body = {
+        "dry": bool(req.dry),
+        "swapType": "EXACT_INPUT",
+        "slippageTolerance": SWAP_SLIPPAGE_BPS,
+        "originAsset": origin["assetId"],
+        "depositType": "ORIGIN_CHAIN",
+        "destinationAsset": dest["assetId"],
+        "amount": str(amount_units),
+        "refundTo": refund_to,
+        "refundType": "ORIGIN_CHAIN",
+        "recipient": recipient,
+        "recipientType": "DESTINATION_CHAIN",
+        "deadline": deadline,
+    }
+    resp = await aintents("/v0/quote", body=body)
+    q = resp.get("quote", {}) or {}
+    view = _quote_view(q, deadline)
+
+    if req.dry:
+        return {"dry": True, "direction": req.direction, "asset": req.asset, "quote": view}
+
+    deposit_address = q.get("depositAddress", "")
+    if not deposit_address:
+        raise HTTPException(502, detail="swap service returned no deposit address")
+    sid = str(uuid.uuid4())
+    rec = {
+        "id": sid,
+        "user_id": session["user_id"],
+        "direction": req.direction,
+        "asset": req.asset,
+        "chain": asset["chain"],
+        "amount_units": str(amount_units),
+        "deposit_address": deposit_address,
+        "deposit_memo": q.get("depositMemo", "") or "",
+        "recipient": recipient,
+        "refund_to": refund_to,
+        "quote": view,
+        "status": "AWAITING_DEPOSIT" if req.direction == "buy" else "READY_TO_SEND",
+        "created": time.time(),
+        "updated": time.time(),
+        "correlation_id": resp.get("correlationId", ""),
+        "txid": "",
+    }
+    swaps[sid] = rec
+    save_swaps()
+    return {"dry": False, "swap": rec}
+
+@app.post("/api/swap/execute")
+async def swap_execute(req: SwapExecuteReq, session=Depends(get_session)):
+    """Sell side only: send the user's ZEC to their own quote's deposit address."""
+    rec = swaps.get(req.swap_id)
+    if not rec or rec.get("user_id") != session["user_id"]:
+        raise HTTPException(404, detail="swap not found")
+    if rec.get("direction") != "sell":
+        raise HTTPException(400, detail="only sell swaps execute server-side")
+    if rec.get("status") != "READY_TO_SEND":
+        raise HTTPException(409, detail=f"swap is {rec.get('status')}")
+    if rec.get("deposit_memo"):
+        raise HTTPException(400, detail="memo deposits are not supported for ZEC")
+    dl = (rec.get("quote") or {}).get("deadline", "")
+    try:
+        dl_ts = datetime.fromisoformat(dl.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        dl_ts = 0
+    if dl_ts and dl_ts - time.time() < 60:
+        rec["status"] = "EXPIRED"
+        rec["updated"] = time.time()
+        save_swaps()
+        raise HTTPException(409, detail="quote expired — get a fresh one")
+
+    wn = session["wallet_name"]
+    zats = int(rec["amount_units"])
+    outputs = [{"address": rec["deposit_address"], "amount": zats}]
+    result = await azec(wn, "send", [json.dumps(outputs)])
+    await azec(wn, "save")
+    wallet_cache.pop(wn, None)
+    txid = ""
+    if isinstance(result, dict):
+        txid = result.get("txid", "") or ""
+        if not txid and "raw" in result:
+            m = re.search(r'"txid"\s*:\s*"([0-9a-fA-F]{16,64})"', str(result["raw"]))
+            txid = m.group(1) if m else ""
+    rec["status"] = "DEPOSIT_SENT"
+    rec["txid"] = str(txid)[:120]
+    rec["updated"] = time.time()
+    save_swaps()
+    if rec["txid"]:
+        # Best-effort: telling 1Click about the tx speeds up solver pickup.
+        try:
+            await aintents("/v0/deposit/submit",
+                           body={"txHash": rec["txid"], "depositAddress": rec["deposit_address"]})
+        except Exception:
+            pass
+    return {"swap": rec}
+
+@app.get("/api/swap/list")
+async def swap_list(session=Depends(get_session)):
+    mine = [r for r in swaps.values() if r.get("user_id") == session["user_id"]]
+    mine.sort(key=lambda r: r.get("created", 0), reverse=True)
+    return {"swaps": mine[:20]}
+
+@app.get("/api/swap/status/{swap_id}")
+async def swap_status(swap_id: str, session=Depends(get_session)):
+    rec = swaps.get(swap_id)
+    if not rec or rec.get("user_id") != session["user_id"]:
+        raise HTTPException(404, detail="swap not found")
+    if rec.get("status") in TERMINAL_SWAP_STATES:
+        return {"swap": rec}
+    params = {"depositAddress": rec["deposit_address"]}
+    if rec.get("deposit_memo"):
+        params["depositMemo"] = rec["deposit_memo"]
+    try:
+        st = await aintents("/v0/status", params=params)
+    except HTTPException:
+        # Right after quote creation the service may briefly not know the
+        # address; keep our local state rather than erroring the poll.
+        return {"swap": rec}
+    remote = st.get("status", "")
+    if remote:
+        # PENDING_DEPOSIT must not overwrite the richer local sell state
+        # (we already broadcast the ZEC; the solver just hasn't seen it).
+        if not (rec.get("direction") == "sell" and remote == "PENDING_DEPOSIT"
+                and rec.get("status") == "DEPOSIT_SENT"):
+            rec["status"] = remote
+    details = st.get("swapDetails") or {}
+    if isinstance(details, dict) and details:
+        dest_txs = details.get("destinationChainTxHashes") or []
+        dest_tx = ""
+        if isinstance(dest_txs, list) and dest_txs:
+            first = dest_txs[0]
+            dest_tx = first.get("hash", "") if isinstance(first, dict) else str(first)
+        rec["details"] = {
+            "amount_in": details.get("amountInFormatted") or details.get("amountIn"),
+            "amount_out": details.get("amountOutFormatted") or details.get("amountOut"),
+            "dest_tx": dest_tx,
+        }
+    rec["updated"] = time.time()
+    save_swaps()
+    return {"swap": rec}
 
 # ─── Admin ────────────────────────────────────────────────────────────────────
 # ADMIN_PASSWORD is defined at the top of the file (env-overridable).
