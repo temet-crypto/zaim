@@ -99,6 +99,7 @@ export default function ZaimSwap({ onBack }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [copiedAmt, setCopiedAmt] = useState(false);
   const pollRef = useRef(null);
 
   const chain = ASSETS.find(a => a.key === asset)?.chain || "";
@@ -192,7 +193,8 @@ export default function ZaimSwap({ onBack }) {
             <div className="mp-band mp-band-w">
               <div className="mp-lbl-sm" style={{ marginBottom: 6, color: T.blue }}>SEND EXACTLY</div>
               <div className="mp-big" style={{ fontSize: 34 }}>{q.amount_in} {swap.asset}</div>
-              <div className="mp-lbl-sm" style={{ marginTop: 8 }}>ON {swap.chain} · ONE PAYMENT · YOU GET ≈ {q.amount_out} ZEC</div>
+              <button className="mp-link" style={{ marginTop: 8 }} onClick={() => { navigator.clipboard?.writeText(String(q.amount_in)); setCopiedAmt(true); setTimeout(() => setCopiedAmt(false), 1600); }}>{copiedAmt ? "COPIED" : "TAP TO COPY AMOUNT"}</button>
+              <div className="mp-lbl-sm" style={{ marginTop: 10 }}>ON {swap.chain} · ONE PAYMENT · SEND LESS AND IT STALLS · YOU GET ≈ {q.amount_out} ZEC</div>
             </div>
             <div className="mp-band mp-band-w" style={{ textAlign: "center" }}>
               <div style={{ display: "inline-block", padding: 10, border: `2px solid ${T.black}`, background: T.white }}>
