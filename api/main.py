@@ -993,13 +993,25 @@ async def swap_execute(req: SwapExecuteReq, session=Depends(get_session)):
     await azec(wn, "save")
     wallet_cache.pop(wn, None)
     txid = ""
+    err_text = ""
     if isinstance(result, dict):
-        txid = result.get("txid", "") or ""
-        if not txid and "raw" in result:
-            m = re.search(r'"txid"\s*:\s*"([0-9a-fA-F]{16,64})"', str(result["raw"]))
+        txid = str(result.get("txid", "") or "")
+        raw = str(result.get("raw", "") or result.get("error", "") or "")
+        if not txid and raw:
+            m = re.search(r'"txid"\s*:\s*"([0-9a-fA-F]{32,64})"', raw)
             txid = m.group(1) if m else ""
+            if not txid:
+                err_text = raw[:200]
+    if not re.fullmatch(r"[0-9a-fA-F]{32,64}", txid):
+        # zecwallet-cli exits 0 on some failures (e.g. insufficient funds) and
+        # only reports the problem in its output. No txid means NOTHING was
+        # broadcast — refuse loudly and keep the swap READY_TO_SEND so a
+        # funded retry can still use it. Never record a send that didn't
+        # happen (the MAXPAIN phantom-close lesson).
+        raise HTTPException(400, detail="send failed — nothing broadcast: "
+                            + (err_text or "wallet returned no txid"))
     rec["status"] = "DEPOSIT_SENT"
-    rec["txid"] = str(txid)[:120]
+    rec["txid"] = txid
     rec["updated"] = time.time()
     save_swaps()
     if rec["txid"]:
