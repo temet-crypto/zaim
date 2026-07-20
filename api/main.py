@@ -69,7 +69,7 @@ wallet_activity = {}  # wallet_name -> last authed-request timestamp
 def normalize_seed(phrase):
     words = (phrase or "").strip().lower().split()
     if len(words) < 12 or len(words) > 33 or any(not w.isalpha() for w in words):
-        raise HTTPException(400, detail="that does not look like a seed phrase (12 to 24 words)")
+        raise HTTPException(400, detail="That does not look like a seed phrase (12 to 24 words)")
     return " ".join(words)
 
 def seed_fingerprint(norm_seed):
@@ -122,7 +122,7 @@ def unseal_wallet(wn, key):
     try:
         data = AESGCM(key).decrypt(blob[:12], blob[12:], b"zaim-sealed-v1")
     except Exception:
-        raise HTTPException(500, detail="sealed wallet failed to open. the seed derives the key, so this should not happen")
+        raise HTTPException(500, detail="The sealed wallet failed to open. The seed derives the key, so this should not happen")
     os.makedirs(wdir, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
         t.extractall(wdir, filter="data")
@@ -196,7 +196,7 @@ def zec(wallet_name, command, args=None):
         out = r.stdout.strip()
         if r.returncode != 0:
             err = r.stderr.strip() or out
-            raise HTTPException(500, detail="cli error: " + err)
+            raise HTTPException(500, detail="CLI error: " + err)
         try:
             return json.loads(out)
         except json.JSONDecodeError:
@@ -456,7 +456,7 @@ def get_session(request: Request):
         # A sealed wallet cannot serve requests: the key died with the last
         # active period (idle seal or restart). The seed must be entered again.
         if not os.path.isdir(wdir) and os.path.exists(sealed):
-            raise HTTPException(401, detail="wallet is sealed. enter your seed to unlock it")
+            raise HTTPException(401, detail="Wallet is sealed. Enter your seed to unlock it")
         wallet_activity[wn] = time.time()
     return s
 
@@ -514,14 +514,14 @@ async def create_wallet():
         birthday = seed_result.get("birthday", 0)
     if not seed_text:
         shutil.rmtree(os.path.join(WDIR, tmp_wn), ignore_errors=True)
-        raise HTTPException(500, detail="wallet creation failed, no seed produced")
+        raise HTTPException(500, detail="Wallet creation failed. No seed was produced")
     norm = normalize_seed(seed_text)
     fp = seed_fingerprint(norm)
     wn = "zw_" + fp
     wdir, _ = _wallet_paths(wn)
     if os.path.isdir(wdir) or os.path.exists(_wallet_paths(wn)[1]):
         shutil.rmtree(os.path.join(WDIR, tmp_wn), ignore_errors=True)
-        raise HTTPException(500, detail="wallet collision, try again")
+        raise HTTPException(500, detail="Wallet collision. Try again")
     z_addr, t_addr, ua_addr = await _read_addresses(tmp_wn)
     await azec(tmp_wn, "save")
     os.rename(os.path.join(WDIR, tmp_wn), wdir)
@@ -561,7 +561,7 @@ async def open_wallet(req: OpenReq):
                     restore_cmd, capture_output=True, text=True, timeout=600, env=env))
                 if r.returncode != 0 and "error" in (r.stderr + r.stdout).lower():
                     shutil.rmtree(wdir, ignore_errors=True)
-                    raise HTTPException(500, detail="restore failed: " + (r.stderr or r.stdout)[:160])
+                    raise HTTPException(500, detail="Restore failed: " + (r.stderr or r.stdout)[:160])
             except subprocess.TimeoutExpired:
                 pass  # long rescan; wallet exists, sync continues in the background
             restored = True
@@ -575,7 +575,7 @@ async def open_wallet(req: OpenReq):
     asyncio.create_task(sync_and_cache(wn))
     return {"token": token, "address": z_addr, "t_address": t_addr,
             "restored": restored,
-            "message": "syncing from the chain, balances may take a few minutes" if restored else "unlocked"}
+            "message": "Syncing from the chain. Balances may take a few minutes" if restored else "Unlocked"}
 
 @app.post("/api/wallet/logout")
 async def logout_wallet(request: Request, session=Depends(get_session)):
@@ -802,11 +802,11 @@ def _intents_request(path, body=None, params=None):
             msg = ""
         if isinstance(msg, list):
             msg = "; ".join(str(m) for m in msg)
-        raise HTTPException(502, detail=f"swap service {e.code}: {msg or 'request rejected'}")
+        raise HTTPException(502, detail=f"Swap service {e.code}: {msg or 'request rejected'}")
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, detail=f"swap service unreachable: {e}")
+        raise HTTPException(502, detail=f"Swap service unreachable: {e}")
 
 async def aintents(path, body=None, params=None):
     loop = asyncio.get_event_loop()
@@ -867,10 +867,10 @@ async def swap_assets(session=Depends(get_session)):
 @app.post("/api/swap/quote")
 async def swap_quote(req: SwapQuoteReq, session=Depends(get_session)):
     if req.direction not in ("buy", "sell"):
-        raise HTTPException(400, detail="direction must be buy or sell")
+        raise HTTPException(400, detail="Direction must be buy or sell")
     asset = SWAP_ASSETS.get(req.asset)
     if not asset:
-        raise HTTPException(400, detail="unknown asset")
+        raise HTTPException(400, detail="Unknown asset")
     t_addr = session.get("t_address", "")
     if not t_addr:
         _, t_addr, _ = await _read_addresses(session["wallet_name"])
@@ -878,7 +878,7 @@ async def swap_quote(req: SwapQuoteReq, session=Depends(get_session)):
             session["t_address"] = t_addr
             save_sessions()
     if not t_addr:
-        raise HTTPException(400, detail="wallet has no transparent address yet. try again in a minute")
+        raise HTTPException(400, detail="The wallet has no transparent address yet. Try again in a minute")
 
     from datetime import timedelta, timezone as _tz
     deadline = (datetime.now(_tz.utc) + timedelta(minutes=SWAP_DEADLINE_MIN)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -887,14 +887,14 @@ async def swap_quote(req: SwapQuoteReq, session=Depends(get_session)):
         # ZEC lands at the user's transparent address; refunds go back to the
         # external wallet the user pays from.
         if not req.refund_address or not SWAP_ADDR_RE.match(req.refund_address):
-            raise HTTPException(400, detail="refund address on the origin chain is required")
+            raise HTTPException(400, detail="A refund address on the origin chain is required")
         origin, dest = asset, ZEC_ASSET
         recipient, refund_to = t_addr, req.refund_address
     else:
         # ZEC leaves the user's wallet; refunds (if the swap dies) come back to
         # their own transparent address.
         if not req.recipient_address or not SWAP_ADDR_RE.match(req.recipient_address):
-            raise HTTPException(400, detail="destination address is required")
+            raise HTTPException(400, detail="A destination address is required")
         origin, dest = ZEC_ASSET, asset
         recipient, refund_to = req.recipient_address, t_addr
 
@@ -922,7 +922,7 @@ async def swap_quote(req: SwapQuoteReq, session=Depends(get_session)):
 
     deposit_address = q.get("depositAddress", "")
     if not deposit_address:
-        raise HTTPException(502, detail="swap service returned no deposit address")
+        raise HTTPException(502, detail="The swap service returned no deposit address")
     sid = str(uuid.uuid4())
     rec = {
         "id": sid,
@@ -951,13 +951,13 @@ async def swap_execute(req: SwapExecuteReq, session=Depends(get_session)):
     """Sell side only: send the user's ZEC to their own quote's deposit address."""
     rec = swaps.get(req.swap_id)
     if not rec or rec.get("user_id") != session["wallet_name"]:
-        raise HTTPException(404, detail="swap not found")
+        raise HTTPException(404, detail="Swap not found")
     if rec.get("direction") != "sell":
-        raise HTTPException(400, detail="only sell swaps execute on the server")
+        raise HTTPException(400, detail="Only sell swaps execute on the server")
     if rec.get("status") != "READY_TO_SEND":
-        raise HTTPException(409, detail=f"swap is {rec.get('status')}")
+        raise HTTPException(409, detail=f"The swap is {rec.get('status')}")
     if rec.get("deposit_memo"):
-        raise HTTPException(400, detail="memo deposits are not supported for ZEC")
+        raise HTTPException(400, detail="Memo deposits are not supported for ZEC")
     dl = (rec.get("quote") or {}).get("deadline", "")
     try:
         dl_ts = datetime.fromisoformat(dl.replace("Z", "+00:00")).timestamp()
@@ -967,7 +967,7 @@ async def swap_execute(req: SwapExecuteReq, session=Depends(get_session)):
         rec["status"] = "EXPIRED"
         rec["updated"] = time.time()
         save_swaps()
-        raise HTTPException(409, detail="quote expired. get a fresh one")
+        raise HTTPException(409, detail="The quote expired. Get a fresh one")
 
     wn = session["wallet_name"]
     zats = int(rec["amount_units"])
@@ -991,7 +991,7 @@ async def swap_execute(req: SwapExecuteReq, session=Depends(get_session)):
         # broadcast — refuse loudly and keep the swap READY_TO_SEND so a
         # funded retry can still use it. Never record a send that didn't
         # happen (the MAXPAIN phantom-close lesson).
-        raise HTTPException(400, detail="send failed, nothing broadcast: "
+        raise HTTPException(400, detail="Send failed. Nothing was broadcast: "
                             + (err_text or "wallet returned no txid"))
     rec["status"] = "DEPOSIT_SENT"
     rec["txid"] = txid
@@ -1015,15 +1015,15 @@ async def swap_cancel(req: SwapCancelReq, session=Depends(get_session)):
     lands at the user's own address."""
     rec = swaps.get(req.swap_id)
     if not rec or rec.get("user_id") != session["wallet_name"]:
-        raise HTTPException(404, detail="swap not found")
+        raise HTTPException(404, detail="Swap not found")
     if rec.get("status") in TERMINAL_SWAP_STATES:
         return {"swap": rec}
     if rec.get("direction") == "sell":
         if rec.get("status") != "READY_TO_SEND":
-            raise HTTPException(409, detail=f"cannot cancel while {rec.get('status')}")
+            raise HTTPException(409, detail=f"Cannot cancel while {rec.get('status')}")
     else:
         if rec.get("status") not in ("AWAITING_DEPOSIT", "PENDING_DEPOSIT"):
-            raise HTTPException(409, detail=f"cannot cancel while {rec.get('status')}")
+            raise HTTPException(409, detail=f"Cannot cancel while {rec.get('status')}")
         # Live check upstream: if a deposit was already seen, it is too late.
         try:
             st = await aintents("/v0/status", params={"depositAddress": rec["deposit_address"]})
@@ -1032,7 +1032,7 @@ async def swap_cancel(req: SwapCancelReq, session=Depends(get_session)):
                 rec["status"] = remote
                 rec["updated"] = time.time()
                 save_swaps()
-                raise HTTPException(409, detail="a deposit was already detected. the swap will complete or refund on its own")
+                raise HTTPException(409, detail="A deposit was already detected. The swap will complete or refund on its own")
         except HTTPException as e:
             if e.status_code == 409:
                 raise
@@ -1054,7 +1054,7 @@ async def swap_list(session=Depends(get_session)):
 async def swap_status(swap_id: str, session=Depends(get_session)):
     rec = swaps.get(swap_id)
     if not rec or rec.get("user_id") != session["wallet_name"]:
-        raise HTTPException(404, detail="swap not found")
+        raise HTTPException(404, detail="Swap not found")
     if rec.get("status") in TERMINAL_SWAP_STATES:
         return {"swap": rec}
     params = {"depositAddress": rec["deposit_address"]}

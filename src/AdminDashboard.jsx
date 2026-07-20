@@ -61,7 +61,7 @@ export default function AdminDashboard({ onExit }) {
       </div>
       <div className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div className="mp-lbl-sm">ADMIN PASSWORD</div>
-        <input className="mp-input" type="password" placeholder="password" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && tryAuth()} />
+        <input className="mp-input" type="password" placeholder="Password" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && tryAuth()} />
         {authError && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase" }}>{authError}</div>}
         <button className="mp-btn" onClick={tryAuth}>ENTER</button>
         {onExit && <button className="mp-link" onClick={onExit}>← BACK TO APP</button>}

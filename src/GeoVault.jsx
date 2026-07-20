@@ -201,8 +201,8 @@ function CreateVault({ onBack, onCreate }) {
               }} style={{ fontFamily: F.mono, fontSize: 10, letterSpacing: .5, textTransform: "uppercase", color: T.white, background: T.blue, border: `2px solid ${T.black}`, padding: "5px 9px", cursor: "pointer" }}>{form.locLoading ? "LOCATING…" : "USE MY LOCATION"}</button>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
-              <input className="mp-input" placeholder="latitude" value={form.lat} onChange={e => up("lat", e.target.value)} />
-              <input className="mp-input" placeholder="longitude" value={form.lng} onChange={e => up("lng", e.target.value)} />
+              <input className="mp-input" placeholder="Latitude" value={form.lat} onChange={e => up("lat", e.target.value)} />
+              <input className="mp-input" placeholder="Longitude" value={form.lng} onChange={e => up("lng", e.target.value)} />
             </div>
           </div>
           <div>
@@ -229,7 +229,7 @@ function CreateVault({ onBack, onCreate }) {
           <div><label style={lbl}>ZEC AMOUNT</label><input className="mp-input" placeholder="0.0000" value={form.zec} onChange={e => up("zec", e.target.value)} /></div>
           <div>
             <label style={lbl}>ENCRYPTED MESSAGE · OPTIONAL</label>
-            <textarea className="mp-input" style={{ resize: "none", height: 88, lineHeight: 1.5 }} placeholder="revealed only at unlock via zcash memo" value={form.message} onChange={e => up("message", e.target.value)} />
+            <textarea className="mp-input" style={{ resize: "none", height: 88, lineHeight: 1.5 }} placeholder="Revealed only at unlock via Zcash memo" value={form.message} onChange={e => up("message", e.target.value)} />
             <div style={{ fontFamily: F.mono, fontSize: 9, marginTop: 4, color: form.message.length > 490 ? T.red : T.black }}>{512 - form.message.length} BYTES REMAINING</div>
           </div>
           <div style={{ border: `2px solid ${T.black}`, background: T.blueTint, padding: 12 }}>
@@ -396,8 +396,8 @@ export default function ZAIMGeoVault() {
       </div>
       <div className="mp-kv"><span className="mp-kv-key">TOTAL ESCROWED</span><span className="mp-kv-val" style={{ color: T.teal }}>{totalZec} ZEC</span></div>
       <div className="mp-section">YOUR VAULTS</div>
-      {loading ? <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">loading vaults…</span></div>
-        : vaults.length === 0 ? <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">no vaults yet. drop one below.</span></div>
+      {loading ? <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">Loading vaults…</span></div>
+        : vaults.length === 0 ? <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">No vaults yet. Drop one below.</span></div>
           : vaults.map(v => <VaultCard key={v.id} vault={v} now={now} onClick={vault => { setSelected(vault); setScreen("unlock"); }} onDelete={async (id) => { store.save(store.list().filter(v => v.id !== id)); await loadVaults(); }} />)}
       <div style={{ padding: 16 }}><button className="mp-btn blue" onClick={() => setScreen("create")}>+ CREATE GEOVAULT</button></div>
     </div>

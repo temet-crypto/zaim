@@ -64,7 +64,7 @@ function AuthScreen({ onAuth }) {
   }, []);
   const submit = async () => {
     setError("");
-    if (mode === "open" && seedIn.trim().split(/\s+/).length < 12) return setError("paste your full seed phrase");
+    if (mode === "open" && seedIn.trim().split(/\s+/).length < 12) return setError("Paste your full seed phrase");
     setLoading(true);
     if (mode === "open") setRestoring(true);
     try {
@@ -82,7 +82,7 @@ function AuthScreen({ onAuth }) {
       <div className="mp-section">BACKUP YOUR SEED</div>
       <div className="mp-band">
         <div className="mp-big" style={{ fontSize: 40, marginBottom: 14 }}>SAVE<br />THIS NOW</div>
-        <div className="mp-quip" style={{ marginBottom: 18 }}>write it down. it is the only way back in.</div>
+        <div className="mp-quip" style={{ marginBottom: 18 }}>Write it down. It is the only way back in.</div>
       </div>
       <div className="mp-band mp-band-w">
         <div className="mp-lbl-sm" style={{ marginBottom: 10, color: T.blue }}>SEED PHRASE</div>
@@ -117,11 +117,11 @@ function AuthScreen({ onAuth }) {
         <div className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div>
             <div className="mp-lbl-sm" style={{ marginBottom: 6 }}>SEED PHRASE · YOUR ONLY KEY</div>
-            <textarea className="mp-input" rows={4} value={seedIn} onChange={e => setSeedIn(e.target.value)} placeholder="paste your 24 words" style={{ resize: "none", fontFamily: F.mono, fontSize: 13, lineHeight: 1.6 }} />
+            <textarea className="mp-input" rows={4} value={seedIn} onChange={e => setSeedIn(e.target.value)} placeholder="Paste your 24 words" style={{ resize: "none", fontFamily: F.mono, fontSize: 13, lineHeight: 1.6 }} />
           </div>
           <div>
             <div className="mp-lbl-sm" style={{ marginBottom: 6 }}>BIRTHDAY HEIGHT · OPTIONAL</div>
-            <input className="mp-input" type="number" value={birthday} onChange={e => setBirthday(e.target.value)} placeholder="speeds up a first restore" />
+            <input className="mp-input" type="number" value={birthday} onChange={e => setBirthday(e.target.value)} placeholder="Speeds up a first restore" />
           </div>
           {error && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase", letterSpacing: .5 }}>{error}</div>}
           <button className="mp-btn" onClick={submit} disabled={loading}>{loading ? (restoring ? "OPENING… A FIRST RESTORE CAN TAKE MINUTES" : "…") : "OPEN WALLET"}</button>
@@ -129,7 +129,7 @@ function AuthScreen({ onAuth }) {
         </div>
       ) : (
         <div className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div className="mp-quip">a fresh wallet with a fresh seed. you will be shown the 24 words once. save them like money, because they are.</div>
+          <div className="mp-quip">A fresh wallet with a fresh seed. You will be shown the 24 words once. Save them like money, because they are.</div>
           {error && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase", letterSpacing: .5 }}>{error}</div>}
           <button className="mp-btn" onClick={submit} disabled={loading}>{loading ? "CREATING…" : "CREATE NEW WALLET"}</button>
         </div>
@@ -232,7 +232,7 @@ function HomeScreen({ onNav }) {
       </div>
       <div className="mp-band mp-band-w">
         <div className="mp-lbl-sm" style={{ marginBottom: 6, color: T.blue }}>SHIELDED ADDRESS</div>
-        <div className="mp-mono">{address || "loading address…"}</div>
+        <div className="mp-mono">{address || "Loading address…"}</div>
         {tAddr && <>
           <div className="mp-lbl-sm" style={{ margin: "12px 0 6px", color: T.blue }}>TRANSPARENT ADDRESS</div>
           <div className="mp-mono">{tAddr}</div>
@@ -245,7 +245,7 @@ function HomeScreen({ onNav }) {
       </div>
       <div className="mp-section">RECENT TRANSACTIONS</div>
       {txs.length === 0 ? (
-        <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">{loading ? "syncing…" : "no transactions yet."}</span></div>
+        <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">{loading ? "Syncing…" : "No transactions yet."}</span></div>
       ) : txs.map((tx, i) => {
         const rawVal = tx.value || tx.amount || 0;
         const zec = Math.abs(typeof rawVal === "number" ? rawVal / 1e8 : parseFloat(rawVal || 0) / 1e8);
@@ -285,7 +285,7 @@ function SendScreen({ onBack }) {
         <div className="mp-big" style={{ color: T.white }}>{amount}</div>
         <div className="mp-lbl" style={{ color: T.white, marginTop: 12 }}>ZEC SENT</div>
       </div>
-      <div className="mp-band"><div className="mp-quip">shielded and on its way.</div></div>
+      <div className="mp-band"><div className="mp-quip">Shielded and on its way.</div></div>
       <div style={{ padding: 16 }}><button className="mp-btn" onClick={onBack}>DONE</button></div>
     </div>
   );
@@ -293,9 +293,9 @@ function SendScreen({ onBack }) {
     <div className="mp-scroll">
       <div className="mp-head"><div style={{ display: "flex", alignItems: "center", gap: 12 }}><BackArrow onClick={onBack} /><div className="mp-title">Send ZEC</div></div></div>
       <div className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>TO ADDRESS</div><input className="mp-input" value={to} onChange={e => setTo(e.target.value)} placeholder="shielded or unified address" /></div>
+        <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>TO ADDRESS</div><input className="mp-input" value={to} onChange={e => setTo(e.target.value)} placeholder="Shielded or unified address" /></div>
         <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>AMOUNT · ZEC</div><input className="mp-input" type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.0000" /></div>
-        <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>MEMO · OPTIONAL</div><input className="mp-input" value={memo} onChange={e => setMemo(e.target.value)} placeholder="encrypted on-chain message" /></div>
+        <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>MEMO · OPTIONAL</div><input className="mp-input" value={memo} onChange={e => setMemo(e.target.value)} placeholder="Encrypted memo on the chain" /></div>
         {error && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase", letterSpacing: .5 }}>{error}</div>}
         <button className="mp-btn" onClick={send} disabled={loading}>{loading ? "SENDING…" : "SEND"}</button>
       </div>
@@ -318,14 +318,14 @@ function MessengerScreen({ onNav }) {
       {showAdd && (
         <div className="mp-band mp-band-w" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <div className="mp-lbl-sm" style={{ color: T.blue }}>NEW CONTACT</div>
-          <input className="mp-input" value={nn} onChange={e => setNn(e.target.value)} placeholder="contact name" />
-          <input className="mp-input" value={na} onChange={e => setNa(e.target.value)} placeholder="shielded address" />
+          <input className="mp-input" value={nn} onChange={e => setNn(e.target.value)} placeholder="Contact name" />
+          <input className="mp-input" value={na} onChange={e => setNa(e.target.value)} placeholder="Shielded address" />
           {err && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase" }}>{err}</div>}
           <button className="mp-btn" onClick={add}>ADD CONTACT</button>
         </div>
       )}
       {contacts.length === 0 ? (
-        <div className="mp-band" style={{ textAlign: "center" }}><div className="mp-quip" style={{ marginBottom: 8 }}>no contacts yet.</div><div className="mp-lbl-sm">TAP + TO START A CONVERSATION</div></div>
+        <div className="mp-band" style={{ textAlign: "center" }}><div className="mp-quip" style={{ marginBottom: 8 }}>No contacts yet.</div><div className="mp-lbl-sm">TAP + TO START A CONVERSATION</div></div>
       ) : contacts.map((c, i) => (
         <div key={i} onClick={() => onNav("chat", c)} className="mp-row" style={{ cursor: "pointer" }}>
           <div style={{ width: 44, height: 44, background: T.blue, color: T.white, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: F.display, fontWeight: 800, fontSize: 20, flexShrink: 0 }}>{c.name.charAt(0).toUpperCase()}</div>
@@ -365,7 +365,7 @@ function ChatScreen({ contact, onBack }) {
         </div>
       </div>
       <div className="mp-scroll" style={{ padding: "16px", background: T.off }}>
-        {messages.length === 0 && <div style={{ textAlign: "center", padding: "32px 0" }}><span className="mp-quip">send a message as a shielded memo · 0.0001 ZEC each.</span></div>}
+        {messages.length === 0 && <div style={{ textAlign: "center", padding: "32px 0" }}><span className="mp-quip">Send a message as a shielded memo. 0.0001 ZEC each.</span></div>}
         {messages.map((m, i) => {
           const me = m.sent;
           return (
@@ -381,7 +381,7 @@ function ChatScreen({ contact, onBack }) {
       </div>
       <div style={{ borderTop: `2px solid ${T.black}`, background: T.off }}>
         <div style={{ display: "flex", alignItems: "stretch" }}>
-          <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && !sending && sendMsg()} placeholder="type a message…" style={{ flex: 1, fontFamily: F.mono, fontSize: 14, padding: 14, background: T.white, border: "none", borderRight: `2px solid ${T.black}`, color: T.black, outline: "none" }} />
+          <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && !sending && sendMsg()} placeholder="Type a message…" style={{ flex: 1, fontFamily: F.mono, fontSize: 14, padding: 14, background: T.white, border: "none", borderRight: `2px solid ${T.black}`, color: T.black, outline: "none" }} />
           <button onClick={() => !sending && sendMsg()} style={{ width: 60, border: "none", background: sending ? T.faint : T.blue, cursor: sending ? "wait" : "pointer", display: "flex", alignItems: "center", justifyContent: "center" }} aria-label="Send">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" stroke="#fff" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" /></svg>
           </button>

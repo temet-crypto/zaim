@@ -129,9 +129,9 @@ export default function ZaimSwap({ onBack }) {
 
   const getQuote = async () => {
     setError("");
-    if (!amount || parseFloat(amount) <= 0) return setError("enter an amount");
-    if (mode === "buy" && !refundAddr.trim()) return setError(`enter your ${chain} refund address`);
-    if (mode === "sell" && !destAddr.trim()) return setError(`enter the ${chain} address that receives ${asset}`);
+    if (!amount || parseFloat(amount) <= 0) return setError("Enter an amount");
+    if (mode === "buy" && !refundAddr.trim()) return setError(`Enter your ${chain} refund address`);
+    if (mode === "sell" && !destAddr.trim()) return setError(`Enter the ${chain} address that receives ${asset}`);
     setLoading(true);
     try {
       const r = await api.post("/swap/quote", {
@@ -204,7 +204,7 @@ export default function ZaimSwap({ onBack }) {
               <button className="mp-link" style={{ marginTop: 8 }} onClick={copyDeposit}>{copied ? "COPIED" : "TAP TO COPY ADDRESS"}</button>
             </div>
             <div className="mp-band">
-              <div className="mp-quip">send from any wallet you control. this quote expires in {minsLeft == null ? "a few" : minsLeft} min. an unpaid quote simply lapses, and a late deposit refunds to your address.</div>
+              <div className="mp-quip">Send from any wallet you control. This quote expires in {minsLeft == null ? "a few" : minsLeft} min. An unpaid quote simply lapses, and a late deposit refunds to your address.</div>
             </div>
           </>
         )}
@@ -230,7 +230,7 @@ export default function ZaimSwap({ onBack }) {
 
         {swap.direction === "sell" && swap.status !== "READY_TO_SEND" && !terminal && (
           <div className="mp-band">
-            <div className="mp-quip">zec is on its way to the swap. this usually takes a couple of minutes.</div>
+            <div className="mp-quip">ZEC is on its way to the swap. This usually takes a couple of minutes.</div>
             {swap.txid && <div className="mp-mono" style={{ marginTop: 10, fontSize: 11, wordBreak: "break-all" }}>tx {swap.txid}</div>}
           </div>
         )}
@@ -249,7 +249,7 @@ export default function ZaimSwap({ onBack }) {
                 </>
               ) : (
                 <div className="mp-quip">
-                  {swap.status === "CANCELLED" ? "cancelled. nothing moved." : swap.status === "REFUNDED" ? "the swap did not complete. funds were returned to the refund address." : "the swap did not complete. nothing further will move."}
+                  {swap.status === "CANCELLED" ? "Cancelled. Nothing moved." : swap.status === "REFUNDED" ? "The swap did not complete. Funds were returned to the refund address." : "The swap did not complete. Nothing further will move."}
                 </div>
               )}
             </div>
@@ -300,12 +300,12 @@ export default function ZaimSwap({ onBack }) {
         {mode === "buy" ? (
           <div>
             <div className="mp-lbl-sm" style={{ marginBottom: 6 }}>YOUR {chain.toUpperCase()} REFUND ADDRESS</div>
-            <input className="mp-input" value={refundAddr} onChange={e => { setRefundAddr(e.target.value); setQuote(null); }} placeholder={`the ${chain} wallet you are paying from`} />
+            <input className="mp-input" value={refundAddr} onChange={e => { setRefundAddr(e.target.value); setQuote(null); }} placeholder={`The ${chain} wallet you are paying from`} />
           </div>
         ) : (
           <div>
             <div className="mp-lbl-sm" style={{ marginBottom: 6 }}>{asset} DESTINATION · {chain.toUpperCase()}</div>
-            <input className="mp-input" value={destAddr} onChange={e => { setDestAddr(e.target.value); setQuote(null); }} placeholder={`where your ${asset} should arrive`} />
+            <input className="mp-input" value={destAddr} onChange={e => { setDestAddr(e.target.value); setQuote(null); }} placeholder={`Where your ${asset} should arrive`} />
           </div>
         )}
         <Err msg={error} />
@@ -317,7 +317,7 @@ export default function ZaimSwap({ onBack }) {
           <div className="mp-section">QUOTE</div>
           <QuotePanel quote={quote} />
           <div className="mp-band">
-            <div className="mp-quip">{mode === "buy" ? "confirm to lock a deposit address. rates refresh at confirm." : "confirm to lock the swap, then approve the send."}</div>
+            <div className="mp-quip">{mode === "buy" ? "Confirm to lock a deposit address. Rates refresh at confirm." : "Confirm to lock the swap, then approve the send."}</div>
           </div>
           <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
             <button className="mp-btn" onClick={confirm} disabled={loading}>{loading ? "LOCKING…" : mode === "buy" ? "CONFIRM · GET DEPOSIT ADDRESS" : "CONFIRM SELL"}</button>
