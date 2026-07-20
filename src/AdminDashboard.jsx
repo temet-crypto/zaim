@@ -95,11 +95,11 @@ export default function AdminDashboard({ onExit }) {
 
       {tab === "Stats" && stats && (
         <div className="mp-grid">
-          <StatCell label="Total Users" value={stats.total_users} />
-          <StatCell label="GeoVaults" value={stats.total_geovaults} />
-          <StatCell label="Contacts" value={stats.total_contacts} />
+          <StatCell label="Open Wallets" value={Array.isArray(stats.wallets_active) ? stats.wallets_active.length : stats.wallets_active} />
+          <StatCell label="Sealed" value={stats.wallets_sealed} />
           <StatCell label="Sessions" value={stats.active_sessions} />
-          <StatCell label="Cached Wallets" value={stats.cached_wallets} />
+          <StatCell label="Swaps Open" value={stats.swaps_open} />
+          <StatCell label="Swaps Total" value={stats.swaps_total} />
         </div>
       )}
 

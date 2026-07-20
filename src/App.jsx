@@ -17,20 +17,25 @@ const API = {
   headers: () => ({ "Content-Type": "application/json", ...(localStorage.getItem("zaim_token") ? { Authorization: `Bearer ${localStorage.getItem("zaim_token")}` } : {}) }),
   async post(p, b) { const r = await fetch(`/api${p}`, { method: "POST", headers: this.headers(), body: JSON.stringify(b) }); const d = await r.json(); if (!r.ok) throw new Error(d.detail || "Failed"); return d; },
   async get(p) { const r = await fetch(`/api${p}`, { headers: this.headers() }); const d = await r.json(); if (!r.ok) throw new Error(d.detail || "Failed"); return d; },
-  createWallet: (u, p) => API.post("/wallet/create", { username: u, password: p }),
-  login: (u, p) => API.post("/wallet/login", { username: u, password: p }),
+  createWallet: () => API.post("/wallet/create", {}),
+  openWallet: (seed, birthday) => API.post("/wallet/open", { seed_phrase: seed, birthday: birthday || 0 }),
+  logout: () => API.post("/wallet/logout", {}),
   getBalance: () => API.get("/wallet/balance"),
   getAddress: () => API.get("/wallet/address"),
   sendPayment: (to, amt, memo) => API.post("/wallet/send", { to_address: to, amount: amt, memo }),
   sendMessage: (to, msg) => API.post("/message/send", { to_address: to, message: msg }),
   getMessages: () => API.get("/messages"),
   getTransactions: () => API.get("/wallet/transactions"),
-  getContacts: () => API.get("/contacts"),
-  addContact: (n, a) => API.post("/contacts", { name: n, address: a }),
   health: () => API.get("/health"),
   getPrice: () => API.get("/price"),
   getSeed: () => API.get("/wallet/seed"),
   nodeInfo: () => API.get("/node/info"),
+};
+
+// Contacts live on THIS device only. No account, no server copy.
+const Contacts = {
+  list: () => { try { return JSON.parse(localStorage.getItem("zaim_contacts") || "[]"); } catch (e) { return []; } },
+  add: (name, address) => { const c = Contacts.list(); c.push({ name, address }); localStorage.setItem("zaim_contacts", JSON.stringify(c)); return c; },
 };
 
 // ── shared bits ──────────────────────────────────────────────────────────────
@@ -44,10 +49,11 @@ const Toast = ({ msg, type = "info" }) => msg ? (
 ) : null;
 
 function AuthScreen({ onAuth }) {
-  const [mode, setMode] = useState("login");
-  const [user, setUser] = useState(""); const [pass, setPass] = useState("");
+  const [mode, setMode] = useState("open");
+  const [seedIn, setSeedIn] = useState(""); const [birthday, setBirthday] = useState("");
   const [loading, setLoading] = useState(false); const [error, setError] = useState("");
   const [seed, setSeed] = useState("");
+  const [restoring, setRestoring] = useState(false);
   const [price, setPrice] = useState(null);
   useEffect(() => {
     let alive = true;
@@ -57,15 +63,19 @@ function AuthScreen({ onAuth }) {
     return () => { alive = false; clearInterval(iv); };
   }, []);
   const submit = async () => {
-    if (!user || !pass) return setError("Enter username and password");
-    setLoading(true); setError("");
+    setError("");
+    if (mode === "open" && seedIn.trim().split(/\s+/).length < 12) return setError("paste your full seed phrase");
+    setLoading(true);
+    if (mode === "open") setRestoring(true);
     try {
-      const res = mode === "create" ? await API.createWallet(user, pass) : await API.login(user, pass);
-      localStorage.setItem("zaim_token", res.token); localStorage.setItem("zaim_user", user);
+      const res = mode === "create"
+        ? await API.createWallet()
+        : await API.openWallet(seedIn.trim(), parseInt(birthday) || 0);
+      localStorage.setItem("zaim_token", res.token);
       if (res.seed) setSeed(typeof res.seed === "string" ? res.seed : (res.seed.seed || JSON.stringify(res.seed)));
       else onAuth();
     } catch (e) { setError(e.message); }
-    setLoading(false);
+    setLoading(false); setRestoring(false);
   };
   if (seed) return (
     <div className="mp-scroll">
@@ -97,24 +107,33 @@ function AuthScreen({ onAuth }) {
         )}
       </div>
       <div style={{ display: "flex", borderBottom: `2px solid ${T.black}` }}>
-        {["login", "create"].map((m, i) => (
+        {["open", "create"].map((m, i) => (
           <div key={m} onClick={() => { setMode(m); setError(""); }} style={{ flex: 1, padding: "14px 0", textAlign: "center", cursor: "pointer", fontFamily: F.display, fontWeight: 800, fontSize: 18, textTransform: "uppercase", letterSpacing: .5, borderRight: i === 0 ? `2px solid ${T.black}` : "none", background: mode === m ? T.blue : T.off, color: mode === m ? T.white : T.black }}>
-            {m === "login" ? "Sign In" : "Create"}
+            {m === "open" ? "My Seed" : "New Wallet"}
           </div>
         ))}
       </div>
-      <div className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <div>
-          <div className="mp-lbl-sm" style={{ marginBottom: 6 }}>USERNAME</div>
-          <input className="mp-input" value={user} onChange={e => setUser(e.target.value)} placeholder="username" />
+      {mode === "open" ? (
+        <div className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div>
+            <div className="mp-lbl-sm" style={{ marginBottom: 6 }}>SEED PHRASE · YOUR ONLY KEY</div>
+            <textarea className="mp-input" rows={4} value={seedIn} onChange={e => setSeedIn(e.target.value)} placeholder="paste your 24 words" style={{ resize: "none", fontFamily: F.mono, fontSize: 13, lineHeight: 1.6 }} />
+          </div>
+          <div>
+            <div className="mp-lbl-sm" style={{ marginBottom: 6 }}>BIRTHDAY HEIGHT · OPTIONAL</div>
+            <input className="mp-input" type="number" value={birthday} onChange={e => setBirthday(e.target.value)} placeholder="speeds up a first restore" />
+          </div>
+          {error && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase", letterSpacing: .5 }}>{error}</div>}
+          <button className="mp-btn" onClick={submit} disabled={loading}>{loading ? (restoring ? "OPENING… A FIRST RESTORE CAN TAKE MINUTES" : "…") : "OPEN WALLET"}</button>
+          <div className="mp-lbl-sm" style={{ textAlign: "center" }}>NO USERNAME. NO PASSWORD. THE SEED IS THE ACCOUNT.</div>
         </div>
-        <div>
-          <div className="mp-lbl-sm" style={{ marginBottom: 6 }}>PASSWORD</div>
-          <input className="mp-input" type="password" value={pass} onChange={e => setPass(e.target.value)} placeholder="8+ characters" onKeyDown={e => e.key === "Enter" && !loading && submit()} />
+      ) : (
+        <div className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div className="mp-quip">a fresh wallet with a fresh seed. you will be shown the 24 words once. save them like money, because they are.</div>
+          {error && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase", letterSpacing: .5 }}>{error}</div>}
+          <button className="mp-btn" onClick={submit} disabled={loading}>{loading ? "CREATING…" : "CREATE NEW WALLET"}</button>
         </div>
-        {error && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase", letterSpacing: .5 }}>{error}</div>}
-        <button className="mp-btn" onClick={submit} disabled={loading}>{loading ? "..." : (mode === "create" ? "CREATE WALLET" : "SIGN IN")}</button>
-      </div>
+      )}
     </div>
   );
 }
@@ -287,8 +306,8 @@ function SendScreen({ onBack }) {
 function MessengerScreen({ onNav }) {
   const [contacts, setContacts] = useState([]); const [showAdd, setShowAdd] = useState(false);
   const [nn, setNn] = useState(""); const [na, setNa] = useState(""); const [err, setErr] = useState("");
-  useEffect(() => { API.getContacts().then(r => setContacts(r.contacts || [])).catch(() => { }); }, []);
-  const add = async () => { if (!nn || !na) return setErr("Enter name and address"); try { const r = await API.addContact(nn, na); setContacts(r.contacts || []); setShowAdd(false); setNn(""); setNa(""); setErr(""); } catch (e) { setErr(e.message); } };
+  useEffect(() => { setContacts(Contacts.list()); }, []);
+  const add = () => { if (!nn || !na) return setErr("Enter name and address"); setContacts(Contacts.add(nn, na)); setShowAdd(false); setNn(""); setNa(""); setErr(""); };
   return (
     <div className="mp-scroll">
       <ScreenHead title="Messages" meta="ZAIM" right={
@@ -405,7 +424,8 @@ function SettingsScreen({ onLogout, onAdmin }) {
       <KV k="Memo Privacy" v="ON-CHAIN" color={T.teal} />
       <KVm k="Address Type" v="z address · shielded" />
       <div className="mp-section">ACCOUNT</div>
-      <KVm k="User" v={localStorage.getItem("zaim_user") || "···"} />
+      <KVm k="Identity" v="your seed · no account" color={T.blue} />
+      <KVm k="At rest" v="sealed · seed encrypted" color={T.teal} />
       <div className="mp-section">RECOVERY</div>
       <div className="mp-band mp-band-w">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -424,9 +444,12 @@ function SettingsScreen({ onLogout, onAdmin }) {
           </div>
         )}
       </div>
-      <div style={{ padding: 16 }}><button className="mp-btn danger" onClick={onLogout}>SIGN OUT</button></div>
+      <div style={{ padding: 16 }}><button className="mp-btn danger" onClick={onLogout}>SIGN OUT AND SEAL</button></div>
+      <div style={{ padding: "0 16px 8px", textAlign: "center" }}>
+        <span className="mp-lbl-sm">SEALING ENCRYPTS YOUR WALLET ON THE SERVER. ONLY YOUR SEED REOPENS IT.</span>
+      </div>
       <div style={{ padding: "8px 16px 20px", textAlign: "center" }}>
-        <span onClick={onAdmin} className="mp-lbl-sm" style={{ userSelect: "none", cursor: "default", color: T.black, opacity: .5 }}>ZAIM v0.7.0</span>
+        <span onClick={onAdmin} className="mp-lbl-sm" style={{ userSelect: "none", cursor: "default", color: T.black, opacity: .5 }}>ZAIM v0.8.0</span>
       </div>
     </div>
   );
@@ -457,7 +480,11 @@ export default function ZaimApp() {
   const [tapCount, setTapCount] = useState(0);
   const handleLogoTap = () => { const n = tapCount + 1; setTapCount(n); if (n >= 5) { setScreen("admin"); setTapCount(0); } };
   const nav = (s, d) => { if (s === "chat" && d) { setChatContact(d); setScreen("chat"); } else setScreen(s); };
-  const logout = () => { localStorage.removeItem("zaim_token"); localStorage.removeItem("zaim_user"); setAuthed(false); setScreen("home"); };
+  const logout = async () => {
+    try { await API.logout(); } catch (e) { }  // seal server side, best effort
+    localStorage.removeItem("zaim_token"); localStorage.removeItem("zaim_user");
+    setAuthed(false); setScreen("home");
+  };
   const render = () => {
     switch (screen) {
       case "home": return <HomeScreen onNav={nav} />;

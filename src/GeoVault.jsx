@@ -354,9 +354,13 @@ export default function ZAIMGeoVault() {
   const [now, setNow] = useState(new Date());
   const [vaults, setVaults] = useState([]);
   const [loading, setLoading] = useState(true);
+  const store = {
+    list: () => { try { return JSON.parse(localStorage.getItem("zaim_geovaults") || "[]"); } catch (e) { return []; } },
+    save: (v) => localStorage.setItem("zaim_geovaults", JSON.stringify(v)),
+  };
   const loadVaults = async () => {
     try {
-      const r = await API.get("/geovault");
+      const r = { vaults: store.list() };
       setVaults((r.vaults || []).map(v => ({
         ...v, timeStart: v.time_start, timeEnd: v.time_end,
         mapX: Math.abs(parseFloat(v.lng || 0)) % 100, mapY: Math.abs(parseFloat(v.lat || 0)) % 80,
@@ -371,7 +375,9 @@ export default function ZAIMGeoVault() {
   const totalZec = vaults.reduce((a, v) => a + (parseFloat(v.zec) || 0), 0).toFixed(1);
   if (screen === "create") return <CreateVault onBack={() => setScreen("list")} onCreate={async (form) => {
     try {
-      await API.post("/geovault", { label: form.label || "Unnamed Vault", lat: parseFloat(form.lat) || 0, lng: parseFloat(form.lng) || 0, radius: form.radius, zec: parseFloat(form.zec) || 0, message: form.message, time_start: form.timeStart, time_end: form.timeEnd, wallet_mode: form.walletMode, wallet: form.wallet });
+      const all = store.list();
+      all.push({ id: String(Date.now()), label: form.label || "Unnamed Vault", lat: parseFloat(form.lat) || 0, lng: parseFloat(form.lng) || 0, radius: form.radius, zec: parseFloat(form.zec) || 0, message: form.message, time_start: form.timeStart, time_end: form.timeEnd, wallet_mode: form.walletMode, wallet: form.wallet, created: new Date().toISOString(), status: "active" });
+      store.save(all);
       await loadVaults();
     } catch (e) { alert("Failed to save vault: " + e.message); }
     setScreen("list");
@@ -392,7 +398,7 @@ export default function ZAIMGeoVault() {
       <div className="mp-section">YOUR VAULTS</div>
       {loading ? <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">loading vaults…</span></div>
         : vaults.length === 0 ? <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">no vaults yet. drop one below.</span></div>
-          : vaults.map(v => <VaultCard key={v.id} vault={v} now={now} onClick={vault => { setSelected(vault); setScreen("unlock"); }} onDelete={async (id) => { try { await API.del("/geovault/" + id); await loadVaults(); } catch (e) { alert("Delete failed: " + e.message); } }} />)}
+          : vaults.map(v => <VaultCard key={v.id} vault={v} now={now} onClick={vault => { setSelected(vault); setScreen("unlock"); }} onDelete={async (id) => { store.save(store.list().filter(v => v.id !== id)); await loadVaults(); }} />)}
       <div style={{ padding: 16 }}><button className="mp-btn blue" onClick={() => setScreen("create")}>+ CREATE GEOVAULT</button></div>
     </div>
   );

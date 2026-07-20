@@ -1,13 +1,21 @@
 """
 ZAIM Backend API - FastAPI + zecwallet-cli v1.8 (Zcash Light Client)
-v0.7.0 - NEAR Intents swaps (buy/sell ZEC cross-chain) on top of v0.6.0
+v0.8.0 - Seed only. No usernames, no passwords, no accounts.
+
+The seed phrase is the only credential. Signing in restores or unlocks the
+wallet; signing out seals it. At rest, wallet files live on disk ONLY as an
+AES-GCM blob encrypted with a key derived from the seed itself, so the server
+cannot open a sealed wallet. Plaintext wallet files exist only while a
+session is active (zecwallet-cli needs a real wallet file to operate).
 
 Notes:
-  - Wallets are isolated per user by running the CLI with a per-wallet HOME
+  - Wallets are isolated by running the CLI with a per-wallet HOME
     (zecwallet-cli v1.8 has no --data-dir flag; it resolves ~/.zcash from $HOME).
-  - This service is custodial by design: it holds wallet material server-side.
+  - Wallet identity = fingerprint of the normalized seed (sha256, 16 hex chars).
+    Same seed always lands in the same wallet, from any device, no account row.
 """
 import os, json, time, uuid, hashlib, hmac, secrets, asyncio, subprocess, re
+import tarfile, shutil, io
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from typing import Optional
@@ -15,6 +23,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 CLI = os.getenv("ZECWALLET_CLI", "/app/zecwallet-cli")
 SERVER = os.getenv("LIGHTWALLETD_SERVER", "https://lwdv3.zecwallet.co:443")
@@ -37,13 +46,6 @@ FEE_ADDRESS = os.getenv("FEE_ADDRESS", "")          # house z-address that colle
 FEE_BPS = int(os.getenv("FEE_BPS", "0"))            # fee in basis points (100 = 1.00%)
 FEE_MIN_ZATS = int(os.getenv("FEE_MIN_ZATS", "0"))  # optional floor, in zatoshis
 
-# Usernames become filesystem paths (zaim_<username>_<ts>); constrain them hard
-# so they can't traverse out of WDIR or collide with the _users.json sidecar.
-USERNAME_RE = re.compile(r"^[A-Za-z0-9._@-]{3,64}$")
-
-def valid_username(u):
-    return bool(u) and bool(USERNAME_RE.match(u)) and ".." not in u and not u.startswith("_")
-
 def _warn_default_secret(name, value, default):
     if value == default:
         print(f"[SECURITY] {name} is using the built-in default — set it via env in production.", flush=True)
@@ -52,10 +54,100 @@ _warn_default_secret("API_SECRET", SECRET, "zaim-secret-prod")
 _warn_default_secret("ZAIM_ADMIN_PASSWORD", ADMIN_PASSWORD, "zaim-admin-2026")
 
 sessions = {}
-users = {}
 wallet_cache = {}
-USERS_FILE = os.path.join(WDIR, "_users.json")
 SESSIONS_FILE = os.path.join(WDIR, "_sessions.json")
+
+# ── Seed identity + sealed storage ────────────────────────────────────────────
+# The seed is the only credential. A wallet is identified by a fingerprint of
+# the normalized seed; its files rest on disk only as an AES-GCM blob whose key
+# is derived from the seed. Keys live in memory for active sessions only and
+# are never written anywhere.
+IDLE_SEAL_SEC = int(os.getenv("ZAIM_IDLE_SEAL_MIN", "30")) * 60
+wallet_keys = {}      # wallet_name -> 32-byte AES key (memory only)
+wallet_activity = {}  # wallet_name -> last authed-request timestamp
+
+def normalize_seed(phrase):
+    words = (phrase or "").strip().lower().split()
+    if len(words) < 12 or len(words) > 33 or any(not w.isalpha() for w in words):
+        raise HTTPException(400, detail="that does not look like a seed phrase (12 to 24 words)")
+    return " ".join(words)
+
+def seed_fingerprint(norm_seed):
+    return hashlib.sha256(("zaim-fp-v1:" + norm_seed).encode()).hexdigest()[:16]
+
+def seed_key(norm_seed, fp):
+    return hashlib.pbkdf2_hmac("sha256", norm_seed.encode(), ("zaim-seal-v1:" + fp).encode(), PBKDF2_ITER)
+
+def _wallet_paths(wn):
+    return os.path.join(WDIR, wn), os.path.join(WDIR, wn + ".sealed")
+
+def seal_wallet(wn, key=None):
+    """tar the wallet dir, AES-GCM encrypt it to <wn>.sealed, remove plaintext.
+    Without a key (lost on restart) we can only drop plaintext if a previous
+    seal exists; the next sign-in re-syncs the delta from the chain."""
+    wdir, sealed = _wallet_paths(wn)
+    if not os.path.isdir(wdir):
+        return False
+    key = key or wallet_keys.get(wn)
+    if key:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as t:
+            t.add(wdir, arcname=".")
+        nonce = secrets.token_bytes(12)
+        blob = nonce + AESGCM(key).encrypt(nonce, buf.getvalue(), b"zaim-sealed-v1")
+        tmp = sealed + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(blob)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, sealed)
+    elif not os.path.exists(sealed):
+        print(f"[seal] no key and no prior seal for {wn}; leaving plaintext", flush=True)
+        return False
+    shutil.rmtree(wdir, ignore_errors=True)
+    wallet_keys.pop(wn, None)
+    wallet_activity.pop(wn, None)
+    wallet_cache.pop(wn, None)
+    return True
+
+def unseal_wallet(wn, key):
+    """Decrypt <wn>.sealed back into a plaintext wallet dir. False if absent."""
+    wdir, sealed = _wallet_paths(wn)
+    if os.path.isdir(wdir):
+        return True
+    if not os.path.exists(sealed):
+        return False
+    with open(sealed, "rb") as f:
+        blob = f.read()
+    try:
+        data = AESGCM(key).decrypt(blob[:12], blob[12:], b"zaim-sealed-v1")
+    except Exception:
+        raise HTTPException(500, detail="sealed wallet failed to open. the seed derives the key, so this should not happen")
+    os.makedirs(wdir, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
+        t.extractall(wdir, filter="data")
+    return True
+
+def _live_wallets():
+    return {s.get("wallet_name") for s in sessions.values() if s.get("wallet_name")}
+
+async def periodic_seal():
+    """Seal idle plaintext wallets so keys are not sitting on disk overnight."""
+    while True:
+        await asyncio.sleep(120)
+        now = time.time()
+        try:
+            for entry in list(os.listdir(WDIR)):
+                wdir = os.path.join(WDIR, entry)
+                # Only seed-fingerprint wallets participate in sealing; legacy
+                # password-era dirs (zaim_*) stay untouched until removed.
+                if not os.path.isdir(wdir) or not entry.startswith("zw_"):
+                    continue
+                last = wallet_activity.get(entry, 0)
+                if now - last > IDLE_SEAL_SEC:
+                    await aseal(entry)
+        except Exception as e:
+            print(f"[periodic_seal] {e}", flush=True)
 
 def _atomic_write_json(path, data):
     """Write JSON durably: temp file + fsync + atomic rename, so a crash or
@@ -66,21 +158,6 @@ def _atomic_write_json(path, data):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
-
-def save_users():
-    try:
-        _atomic_write_json(USERS_FILE, users)
-    except Exception as e:
-        print(f"[save_users] {e}", flush=True)
-
-def load_users():
-    global users
-    try:
-        if os.path.exists(USERS_FILE):
-            with open(USERS_FILE) as f:
-                users = json.load(f)
-    except Exception:
-        pass
 
 def save_sessions():
     try:
@@ -129,9 +206,29 @@ def zec(wallet_name, command, args=None):
     except FileNotFoundError:
         raise HTTPException(503, detail="CLI not found")
 
+wallet_locks = {}
+
+def _wlock(wn):
+    if wn not in wallet_locks:
+        wallet_locks[wn] = asyncio.Lock()
+    return wallet_locks[wn]
+
 async def azec(wn, cmd, args=None):
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, zec, wn, cmd, args)
+    """All CLI work runs under a per-wallet lock, and a sealed zw_ wallet is
+    never touched: without this, an in-flight background task could recreate
+    a plaintext dir right after sealing (the CLI makes a FRESH wallet in any
+    empty HOME it is pointed at)."""
+    async with _wlock(wn):
+        if wn.startswith("zw_") and not os.path.isdir(os.path.join(WDIR, wn)):
+            raise HTTPException(409, detail="wallet is sealed")
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, zec, wn, cmd, args)
+
+async def aseal(wn):
+    """Seal under the same lock so we wait out any in-flight CLI call."""
+    async with _wlock(wn):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, seal_wallet, wn)
 
 def parse_balance(raw):
     # `balance` emits JSON, so zec() usually hands us the parsed dict directly.
@@ -227,6 +324,10 @@ def extract_t_addr(t_result):
     return ""
 
 async def sync_and_cache(wallet_name):
+    # Never operate on a wallet that is sealed or gone: the CLI would
+    # silently create a FRESH wallet in an empty HOME (post-logout race).
+    if not os.path.isdir(os.path.join(WDIR, wallet_name)):
+        return None, None
     try:
         await azec(wallet_name, "sync", ["run"])
         bal = await azec(wallet_name, "balance")
@@ -245,6 +346,8 @@ async def sync_and_cache(wallet_name):
         return None, None
 
 async def auto_shield(wallet_name):
+    if not os.path.isdir(os.path.join(WDIR, wallet_name)):
+        return
     try:
         cached = wallet_cache.get(wallet_name, {})
         bal = cached.get("balance", {})
@@ -312,29 +415,26 @@ async def startup_sync():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    load_users()
     load_sessions()
     load_swaps()
     sync_task = asyncio.create_task(periodic_sync())
     startup_task = asyncio.create_task(startup_sync())
     price_task = asyncio.create_task(periodic_price())
+    seal_task = asyncio.create_task(periodic_seal())
     yield
     sync_task.cancel()
     startup_task.cancel()
     price_task.cancel()
+    seal_task.cancel()
 
 app = FastAPI(title="ZAIM API", version="0.7.0", lifespan=lifespan)
 # The SPA is served same-origin (nginx proxies /api), so CORS is belt-and-braces.
 # Restrict to the known origins; Bearer tokens are used (no cookies), so credentials are off.
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
-class CreateReq(BaseModel):
-    username: str
-    password: str
-
-class LoginReq(BaseModel):
-    username: str
-    password: str
+class OpenReq(BaseModel):
+    seed_phrase: str
+    birthday: int = 0
 
 class SendReq(BaseModel):
     to_address: str
@@ -345,180 +445,149 @@ class MsgReq(BaseModel):
     to_address: str
     message: str
 
-class ContactReq(BaseModel):
-    name: str
-    address: str
-
-class RecoverReq(BaseModel):
-    username: str
-    password: str
-    seed_phrase: str
-    birthday: int = 0
-
-def hash_password(p):
-    """PBKDF2-HMAC-SHA256 with a per-user random salt."""
-    salt = secrets.token_bytes(16)
-    dk = hashlib.pbkdf2_hmac("sha256", p.encode(), salt, PBKDF2_ITER)
-    return f"pbkdf2_sha256${PBKDF2_ITER}${salt.hex()}${dk.hex()}"
-
-def _legacy_hash(p):
-    return hashlib.sha256((p + SECRET).encode()).hexdigest()
-
-def verify_password(p, stored):
-    """Verify against the new PBKDF2 format or the legacy sha256(pw+SECRET).
-    Returns (ok, needs_upgrade) so callers can transparently re-hash old creds."""
-    if not stored:
-        return False, False
-    if stored.startswith("pbkdf2_sha256$"):
-        try:
-            _, iters, salt_hex, hash_hex = stored.split("$")
-            dk = hashlib.pbkdf2_hmac("sha256", p.encode(), bytes.fromhex(salt_hex), int(iters))
-            return hmac.compare_digest(dk.hex(), hash_hex), False
-        except Exception:
-            return False, False
-    return hmac.compare_digest(_legacy_hash(p), stored), True
-
 def get_session(request: Request):
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if token not in sessions:
         raise HTTPException(401, detail="Not authenticated")
-    return sessions[token]
+    s = sessions[token]
+    wn = s.get("wallet_name", "")
+    if wn:
+        wdir, sealed = _wallet_paths(wn)
+        # A sealed wallet cannot serve requests: the key died with the last
+        # active period (idle seal or restart). The seed must be entered again.
+        if not os.path.isdir(wdir) and os.path.exists(sealed):
+            raise HTTPException(401, detail="wallet is sealed. enter your seed to unlock it")
+        wallet_activity[wn] = time.time()
+    return s
 
 @app.get("/api/health")
 async def health():
     cli_ok = os.path.exists(CLI)
-    wallets = len([d for d in os.listdir(WDIR) if os.path.isdir(os.path.join(WDIR, d))]) if os.path.exists(WDIR) else 0
-    return {"status": "ok" if cli_ok else "degraded", "backend": "zecwallet-cli v1.8 (light client)", "server": SERVER, "cli_available": cli_ok, "wallets": wallets, "sessions": len(sessions)}
+    active = sealed = 0
+    if os.path.exists(WDIR):
+        for e in os.listdir(WDIR):
+            if e.startswith("_"):
+                continue
+            if os.path.isdir(os.path.join(WDIR, e)):
+                active += 1
+            elif e.endswith(".sealed"):
+                sealed += 1
+    return {"status": "ok" if cli_ok else "degraded", "backend": "zecwallet-cli v1.8 (light client)",
+            "server": SERVER, "cli_available": cli_ok, "wallets_active": active,
+            "wallets_sealed": sealed, "wallets": active + sealed, "sessions": len(sessions)}
 
-@app.post("/api/wallet/create")
-async def create_wallet(req: CreateReq):
-    if not valid_username(req.username):
-        raise HTTPException(400, detail="Invalid username (3 to 64 characters: letters, digits, . _ @ and dash)")
-    if not req.password or len(req.password) < 8:
-        raise HTTPException(400, detail="Password must be at least 8 characters")
-    if req.username in users:
-        raise HTTPException(409, detail="Username exists")
-    wn = "zaim_" + req.username + "_" + str(int(time.time()))
-    await azec(wn, "sync", ["run"])
-    await asyncio.sleep(3)
-    z_addr = ""
-    t_addr = ""
-    ua_addr = ""
-    for attempt in range(3):
-        addr_result = await azec(wn, "addresses")
-        t_result = await azec(wn, "t_addresses")
-        z_addr, t_addr, ua_addr = extract_addrs(addr_result)
-        if not t_addr:
-            t_addr = extract_t_addr(t_result)
-        if z_addr and t_addr:
-            break
-        await asyncio.sleep(2)
-    seed_result = await azec(wn, "seed")
-    await azec(wn, "save")
-    seed_text = ""
-    birthday = 0
-    if isinstance(seed_result, dict):
-        seed_text = seed_result.get("seed", "")
-        birthday = seed_result.get("birthday", 0)
-    token = str(uuid.uuid4())
-    users[req.username] = {
-        "password_hash": hash_password(req.password),
-        "wallet_name": wn,
-        "z_address": z_addr,
-        "t_address": t_addr,
-        "ua_address": ua_addr,
-        "contacts": [],
-    }
-    sessions[token] = {"user_id": req.username, "wallet_name": wn, "created": time.time()}
-    save_users()
-    save_sessions()
-    return {
-        "token": token,
-        "address": z_addr,
-        "t_address": t_addr,
-        "seed": {"seed": seed_text, "birthday": birthday},
-        "message": "Wallet created!"
-    }
-
-
-@app.post("/api/wallet/recover")
-async def recover_wallet(req: RecoverReq):
-    if not valid_username(req.username):
-        raise HTTPException(400, detail="Invalid username (3 to 64 characters: letters, digits, . _ @ and dash)")
-    if not req.password or len(req.password) < 8:
-        raise HTTPException(400, detail="Password must be at least 8 characters")
-    if req.username in users:
-        raise HTTPException(409, detail="Username exists")
-    if not req.seed_phrase or len(req.seed_phrase.split()) < 12:
-        raise HTTPException(400, detail="Invalid seed phrase")
-    wn = "zaim_" + req.username + "_" + str(int(time.time()))
-    wdir, env = wallet_env(wn)
-    # Restore wallet from seed. The seed is only passed to the CLI process (never
-    # persisted to disk) — the resulting wallet.dat lives under this wallet's HOME.
-    try:
-        restore_cmd = [CLI, "--server", SERVER, "--seed", req.seed_phrase, "sync", "run"]
-        if req.birthday > 0:
-            restore_cmd = [CLI, "--server", SERVER, "--seed", req.seed_phrase, "--birthday", str(req.birthday), "sync", "run"]
-        r = await asyncio.get_event_loop().run_in_executor(None, lambda: subprocess.run(restore_cmd, capture_output=True, text=True, timeout=600, env=env))
-        if r.returncode != 0 and "error" in (r.stderr + r.stdout).lower():
-            raise HTTPException(500, detail="Restore failed: " + (r.stderr or r.stdout)[:200])
-    except subprocess.TimeoutExpired:
-        pass  # Sync may timeout but wallet is created
-    # Save wallet
-    try:
-        await azec(wn, "save")
-    except Exception:
-        pass
-    # Extract addresses
-    z_addr = ""
-    t_addr = ""
-    ua_addr = ""
-    for attempt in range(3):
+async def _read_addresses(wn):
+    z_addr = t_addr = ua_addr = ""
+    for _ in range(3):
         try:
             addr_result = await azec(wn, "addresses")
             t_result = await azec(wn, "t_addresses")
             z_addr, t_addr, ua_addr = extract_addrs(addr_result)
-            t_addr = extract_t_addr(t_result)
+            if not t_addr:
+                t_addr = extract_t_addr(t_result)
             if z_addr and t_addr:
                 break
         except Exception:
             pass
         await asyncio.sleep(2)
+    return z_addr, t_addr, ua_addr
+
+def _new_session(wn, z_addr, t_addr, ua_addr):
     token = str(uuid.uuid4())
-    users[req.username] = {
-        "password_hash": hash_password(req.password),
-        "wallet_name": wn,
-        "z_address": z_addr,
-        "t_address": t_addr,
-        "ua_address": ua_addr,
-        "contacts": [],
-    }
-    sessions[token] = {"user_id": req.username, "wallet_name": wn, "created": time.time()}
-    save_users()
+    sessions[token] = {"wallet_name": wn, "created": time.time(),
+                       "z_address": z_addr, "t_address": t_addr, "ua_address": ua_addr}
+    wallet_activity[wn] = time.time()
     save_sessions()
-    asyncio.create_task(sync_and_cache(wn))
+    return token
+
+@app.post("/api/wallet/create")
+async def create_wallet():
+    """Make a brand new wallet. Returns the seed exactly once. The seed IS the
+    account: fingerprint names the wallet dir, seed derives the sealing key."""
+    tmp_wn = "new_" + secrets.token_hex(8)
+    await azec(tmp_wn, "sync", ["run"])
+    await asyncio.sleep(3)
+    seed_result = await azec(tmp_wn, "seed")
+    seed_text, birthday = "", 0
+    if isinstance(seed_result, dict):
+        seed_text = seed_result.get("seed", "")
+        birthday = seed_result.get("birthday", 0)
+    if not seed_text:
+        shutil.rmtree(os.path.join(WDIR, tmp_wn), ignore_errors=True)
+        raise HTTPException(500, detail="wallet creation failed, no seed produced")
+    norm = normalize_seed(seed_text)
+    fp = seed_fingerprint(norm)
+    wn = "zw_" + fp
+    wdir, _ = _wallet_paths(wn)
+    if os.path.isdir(wdir) or os.path.exists(_wallet_paths(wn)[1]):
+        shutil.rmtree(os.path.join(WDIR, tmp_wn), ignore_errors=True)
+        raise HTTPException(500, detail="wallet collision, try again")
+    z_addr, t_addr, ua_addr = await _read_addresses(tmp_wn)
+    await azec(tmp_wn, "save")
+    os.rename(os.path.join(WDIR, tmp_wn), wdir)
+    wallet_keys[wn] = seed_key(norm, fp)
+    token = _new_session(wn, z_addr, t_addr, ua_addr)
     return {
         "token": token,
         "address": z_addr,
         "t_address": t_addr,
-        "message": "Wallet recovered! Syncing may take a few minutes."
+        "seed": {"seed": seed_text, "birthday": birthday},
+        "message": "Wallet created. Save the seed, it is the only way in.",
     }
 
-@app.post("/api/wallet/login")
-async def login(req: LoginReq):
-    load_users()
-    user = users.get(req.username)
-    ok, needs_upgrade = verify_password(req.password, user.get("password_hash")) if user else (False, False)
-    if not user or not ok:
-        raise HTTPException(401, detail="Invalid credentials")
-    if needs_upgrade:
-        user["password_hash"] = hash_password(req.password)
-        save_users()
-    token = str(uuid.uuid4())
-    sessions[token] = {"user_id": req.username, "wallet_name": user["wallet_name"], "created": time.time()}
+@app.post("/api/wallet/open")
+async def open_wallet(req: OpenReq):
+    """Sign in with a seed. Unseals the cached wallet if we have it, otherwise
+    restores from the chain. Same seed, same wallet, any device."""
+    norm = normalize_seed(req.seed_phrase)
+    fp = seed_fingerprint(norm)
+    wn = "zw_" + fp
+    key = seed_key(norm, fp)
+    wdir, sealed = _wallet_paths(wn)
+    loop = asyncio.get_event_loop()
+    restored = False
+    if not os.path.isdir(wdir):
+        if os.path.exists(sealed):
+            await loop.run_in_executor(None, unseal_wallet, wn, key)
+        else:
+            # Fresh restore from seed. The seed goes to the CLI process only.
+            _, env = wallet_env(wn)
+            restore_cmd = [CLI, "--server", SERVER, "--seed", norm]
+            if req.birthday > 0:
+                restore_cmd += ["--birthday", str(req.birthday)]
+            restore_cmd += ["sync", "run"]
+            try:
+                r = await loop.run_in_executor(None, lambda: subprocess.run(
+                    restore_cmd, capture_output=True, text=True, timeout=600, env=env))
+                if r.returncode != 0 and "error" in (r.stderr + r.stdout).lower():
+                    shutil.rmtree(wdir, ignore_errors=True)
+                    raise HTTPException(500, detail="restore failed: " + (r.stderr or r.stdout)[:160])
+            except subprocess.TimeoutExpired:
+                pass  # long rescan; wallet exists, sync continues in the background
+            restored = True
+    wallet_keys[wn] = key
+    try:
+        await azec(wn, "save")
+    except Exception:
+        pass
+    z_addr, t_addr, ua_addr = await _read_addresses(wn)
+    token = _new_session(wn, z_addr, t_addr, ua_addr)
+    asyncio.create_task(sync_and_cache(wn))
+    return {"token": token, "address": z_addr, "t_address": t_addr,
+            "restored": restored,
+            "message": "syncing from the chain, balances may take a few minutes" if restored else "unlocked"}
+
+@app.post("/api/wallet/logout")
+async def logout_wallet(request: Request, session=Depends(get_session)):
+    """Drop this session and seal the wallet if no other session uses it."""
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    wn = session.get("wallet_name", "")
+    sessions.pop(token, None)
     save_sessions()
-    asyncio.create_task(sync_and_cache(user["wallet_name"]))
-    return {"token": token, "address": user.get("z_address", ""), "t_address": user.get("t_address", "")}
+    sealed = False
+    if wn and wn not in _live_wallets():
+        sealed = await aseal(wn)
+    return {"ok": True, "sealed": bool(sealed)}
 
 @app.get("/api/wallet/balance")
 async def get_balance(session=Depends(get_session)):
@@ -543,30 +612,14 @@ async def get_balance(session=Depends(get_session)):
 
 @app.get("/api/wallet/address")
 async def get_address(session=Depends(get_session)):
-    user = users.get(session["user_id"])
-    if not user:
-        raise HTTPException(404)
-    z = user.get("z_address", "")
-    t = user.get("t_address", "")
-    ua = user.get("ua_address", "")
+    z = session.get("z_address", "")
+    t = session.get("t_address", "")
+    ua = session.get("ua_address", "")
     if not z or not t:
-        try:
-            ar = await azec(session["wallet_name"], "addresses")
-            tr = await azec(session["wallet_name"], "t_addresses")
-            z_new, _, ua_new = extract_addrs(ar)
-            t_new = extract_t_addr(tr)
-            if z_new:
-                z = z_new
-                user["z_address"] = z
-            if t_new:
-                t = t_new
-                user["t_address"] = t
-            if ua_new:
-                ua = ua_new
-                user["ua_address"] = ua
-            save_users()
-        except Exception:
-            pass
+        z2, t2, ua2 = await _read_addresses(session["wallet_name"])
+        z, t, ua = z2 or z, t2 or t, ua2 or ua
+        session.update({"z_address": z, "t_address": t, "ua_address": ua})
+        save_sessions()
     return {
         "z_address": z,
         "t_address": t,
@@ -657,24 +710,6 @@ async def get_seed(session=Depends(get_session)):
         return {"seed": seed_text, "birthday": birthday}
     return result
 
-@app.post("/api/contacts")
-async def add_contact(req: ContactReq, session=Depends(get_session)):
-    user = users.get(session["user_id"])
-    if not user:
-        raise HTTPException(404)
-    if "contacts" not in user:
-        user["contacts"] = []
-    user["contacts"].append({"name": req.name, "address": req.address})
-    save_users()
-    return {"contacts": user["contacts"]}
-
-@app.get("/api/contacts")
-async def get_contacts(session=Depends(get_session)):
-    user = users.get(session["user_id"])
-    if not user:
-        raise HTTPException(404)
-    return {"contacts": user.get("contacts", [])}
-
 @app.get("/api/node/info")
 async def node_info():
     return {"server": SERVER, "backend": "zecwallet-cli v1.8", "synced": True}
@@ -693,63 +728,6 @@ async def get_price():
         "age_seconds": int(age) if age is not None else None,
         "source": "coingecko",
     }
-
-# ─── GeoVault ────────────────────────────────────────────────────────────────
-
-class GeoVaultReq(BaseModel):
-    label: str
-    lat: float
-    lng: float
-    radius: int = 50
-    zec: float
-    message: str = ""
-    time_start: str = ""
-    time_end: str = ""
-    wallet_mode: str = "any"
-    wallet: str = ""
-
-@app.get("/api/geovault")
-async def get_vaults(session=Depends(get_session)):
-    user = users.get(session["user_id"])
-    if not user:
-        raise HTTPException(404)
-    return {"vaults": user.get("geovaults", [])}
-
-@app.post("/api/geovault")
-async def create_vault(req: GeoVaultReq, session=Depends(get_session)):
-    user = users.get(session["user_id"])
-    if not user:
-        raise HTTPException(404)
-    if "geovaults" not in user:
-        user["geovaults"] = []
-    import uuid
-    vault = {
-        "id": str(uuid.uuid4()),
-        "label": req.label,
-        "lat": req.lat,
-        "lng": req.lng,
-        "radius": req.radius,
-        "zec": req.zec,
-        "message": req.message,
-        "time_start": req.time_start,
-        "time_end": req.time_end,
-        "wallet_mode": req.wallet_mode,
-        "wallet": req.wallet,
-        "created": __import__('datetime').datetime.utcnow().isoformat(),
-        "status": "active"
-    }
-    user["geovaults"].append(vault)
-    save_users()
-    return {"vault": vault, "vaults": user["geovaults"]}
-
-@app.delete("/api/geovault/{vault_id}")
-async def delete_vault(vault_id: str, session=Depends(get_session)):
-    user = users.get(session["user_id"])
-    if not user:
-        raise HTTPException(404)
-    user["geovaults"] = [v for v in user.get("geovaults", []) if v["id"] != vault_id]
-    save_users()
-    return {"vaults": user["geovaults"]}
 
 # ─── Swap · NEAR Intents 1Click ──────────────────────────────────────────────
 # Cross-chain swaps in and out of ZEC via the 1Click intent API.
@@ -888,15 +866,17 @@ async def swap_assets(session=Depends(get_session)):
 
 @app.post("/api/swap/quote")
 async def swap_quote(req: SwapQuoteReq, session=Depends(get_session)):
-    user = users.get(session["user_id"])
-    if not user:
-        raise HTTPException(404)
     if req.direction not in ("buy", "sell"):
         raise HTTPException(400, detail="direction must be buy or sell")
     asset = SWAP_ASSETS.get(req.asset)
     if not asset:
         raise HTTPException(400, detail="unknown asset")
-    t_addr = user.get("t_address", "")
+    t_addr = session.get("t_address", "")
+    if not t_addr:
+        _, t_addr, _ = await _read_addresses(session["wallet_name"])
+        if t_addr:
+            session["t_address"] = t_addr
+            save_sessions()
     if not t_addr:
         raise HTTPException(400, detail="wallet has no transparent address yet. try again in a minute")
 
@@ -946,7 +926,7 @@ async def swap_quote(req: SwapQuoteReq, session=Depends(get_session)):
     sid = str(uuid.uuid4())
     rec = {
         "id": sid,
-        "user_id": session["user_id"],
+        "user_id": session["wallet_name"],
         "direction": req.direction,
         "asset": req.asset,
         "chain": asset["chain"],
@@ -970,7 +950,7 @@ async def swap_quote(req: SwapQuoteReq, session=Depends(get_session)):
 async def swap_execute(req: SwapExecuteReq, session=Depends(get_session)):
     """Sell side only: send the user's ZEC to their own quote's deposit address."""
     rec = swaps.get(req.swap_id)
-    if not rec or rec.get("user_id") != session["user_id"]:
+    if not rec or rec.get("user_id") != session["wallet_name"]:
         raise HTTPException(404, detail="swap not found")
     if rec.get("direction") != "sell":
         raise HTTPException(400, detail="only sell swaps execute on the server")
@@ -1034,7 +1014,7 @@ async def swap_cancel(req: SwapCancelReq, session=Depends(get_session)):
     deadline. If someone pays a cancelled buy quote anyway, the ZEC still
     lands at the user's own address."""
     rec = swaps.get(req.swap_id)
-    if not rec or rec.get("user_id") != session["user_id"]:
+    if not rec or rec.get("user_id") != session["wallet_name"]:
         raise HTTPException(404, detail="swap not found")
     if rec.get("status") in TERMINAL_SWAP_STATES:
         return {"swap": rec}
@@ -1066,14 +1046,14 @@ async def swap_cancel(req: SwapCancelReq, session=Depends(get_session)):
 
 @app.get("/api/swap/list")
 async def swap_list(session=Depends(get_session)):
-    mine = [r for r in swaps.values() if r.get("user_id") == session["user_id"]]
+    mine = [r for r in swaps.values() if r.get("user_id") == session["wallet_name"]]
     mine.sort(key=lambda r: r.get("created", 0), reverse=True)
     return {"swaps": mine[:20]}
 
 @app.get("/api/swap/status/{swap_id}")
 async def swap_status(swap_id: str, session=Depends(get_session)):
     rec = swaps.get(swap_id)
-    if not rec or rec.get("user_id") != session["user_id"]:
+    if not rec or rec.get("user_id") != session["wallet_name"]:
         raise HTTPException(404, detail="swap not found")
     if rec.get("status") in TERMINAL_SWAP_STATES:
         return {"swap": rec}
@@ -1110,7 +1090,8 @@ async def swap_status(swap_id: str, session=Depends(get_session)):
     return {"swap": rec}
 
 # ─── Admin ────────────────────────────────────────────────────────────────────
-# ADMIN_PASSWORD is defined at the top of the file (env-overridable).
+# There are no accounts to administer any more. Admin is ops only: wallet and
+# session counts, and a force-seal for maintenance windows.
 
 def get_admin(request: Request):
     token = request.headers.get("X-Admin-Token", "")
@@ -1120,84 +1101,45 @@ def get_admin(request: Request):
 
 @app.get("/api/admin/stats")
 async def admin_stats(admin=Depends(get_admin)):
-    total_users = len(users)
-    total_vaults = sum(len(u.get("geovaults", [])) for u in users.values())
-    total_contacts = sum(len(u.get("contacts", [])) for u in users.values())
-    total_sessions = len(sessions)
+    active, sealed_n = [], 0
+    for e in sorted(os.listdir(WDIR)):
+        if e.startswith("_"):
+            continue
+        if os.path.isdir(os.path.join(WDIR, e)):
+            active.append(e)
+        elif e.endswith(".sealed"):
+            sealed_n += 1
+    swaps_open = sum(1 for r in swaps.values() if r.get("status") not in TERMINAL_SWAP_STATES)
     return {
-        "total_users": total_users,
-        "total_geovaults": total_vaults,
-        "total_contacts": total_contacts,
-        "active_sessions": total_sessions,
+        "wallets_active": active,
+        "wallets_sealed": sealed_n,
+        "active_sessions": len(sessions),
         "cached_wallets": len(wallet_cache),
+        "swaps_total": len(swaps),
+        "swaps_open": swaps_open,
     }
-
-@app.get("/api/admin/users")
-async def admin_users(admin=Depends(get_admin)):
-    result = []
-    for username, u in users.items():
-        result.append({
-            "username": username,
-            "wallet_name": u.get("wallet_name", ""),
-            "z_address": u.get("z_address", ""),
-            "t_address": u.get("t_address", ""),
-            "ua_address": u.get("ua_address", ""),
-            "contact_count": len(u.get("contacts", [])),
-            "geovault_count": len(u.get("geovaults", [])),
-            "is_admin": u.get("is_admin", False),
-        })
-    return {"users": result}
-
-@app.get("/api/admin/geovaults")
-async def admin_geovaults(admin=Depends(get_admin)):
-    result = []
-    for username, u in users.items():
-        for v in u.get("geovaults", []):
-            result.append({**v, "owner": username})
-    return {"geovaults": result}
 
 @app.get("/api/admin/sessions")
 async def admin_sessions(admin=Depends(get_admin)):
-    result = []
-    import datetime
+    import datetime as _dt
+    out = []
     for sid, sess in sessions.items():
-        result.append({
+        out.append({
             "session_id": sid[:8] + "...",
-            "user_id": sess.get("user_id", ""),
             "wallet_name": sess.get("wallet_name", ""),
-            "created": datetime.datetime.utcfromtimestamp(sess.get("created", 0)).isoformat() if sess.get("created") else "",
+            "created": _dt.datetime.utcfromtimestamp(sess.get("created", 0)).isoformat() if sess.get("created") else "",
         })
-    return {"sessions": result}
+    return {"sessions": out}
 
-@app.delete("/api/admin/users/{username}")
-async def admin_delete_user(username: str, admin=Depends(get_admin)):
-    if username not in users:
-        raise HTTPException(404, detail="User not found")
-    # Remove sessions for this user
-    to_remove = [sid for sid, s in sessions.items() if s.get("user_id") == username]
-    for sid in to_remove:
-        del sessions[sid]
-    del users[username]
-    save_users()
+@app.post("/api/admin/seal_all")
+async def admin_seal_all(admin=Depends(get_admin)):
+    """Force-seal every wallet with a known key and drop all sessions."""
+    sealed, left = [], []
+    for entry in list(os.listdir(WDIR)):
+        if entry.startswith("_") or not os.path.isdir(os.path.join(WDIR, entry)):
+            continue
+        ok = seal_wallet(entry)
+        (sealed if ok else left).append(entry)
+    sessions.clear()
     save_sessions()
-    return {"deleted": username}
-
-@app.post("/api/admin/users/{username}/make_admin")
-async def admin_promote(username: str, admin=Depends(get_admin)):
-    if username not in users:
-        raise HTTPException(404, detail="User not found")
-    users[username]["is_admin"] = True
-    save_users()
-    return {"username": username, "is_admin": True}
-
-@app.delete("/api/admin/geovaults/{vault_id}")
-async def admin_delete_vault(vault_id: str, admin=Depends(get_admin)):
-    for username, u in users.items():
-        vaults = u.get("geovaults", [])
-        new_vaults = [v for v in vaults if v["id"] != vault_id]
-        if len(new_vaults) < len(vaults):
-            u["geovaults"] = new_vaults
-            save_users()
-            return {"deleted": vault_id, "owner": username}
-    raise HTTPException(404, detail="Vault not found")
-
+    return {"sealed": sealed, "left_plaintext": left}
