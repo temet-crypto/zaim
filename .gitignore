@@ -6,3 +6,4 @@ zcash-data/
 certbot/
 *.log
 .env*
+zingo-cli

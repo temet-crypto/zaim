@@ -1,6 +1,9 @@
 """
-ZAIM Backend API - FastAPI + zecwallet-cli v1.8 (Zcash Light Client)
-v0.8.0 - Seed only. No usernames, no passwords, no accounts.
+ZAIM Backend API - FastAPI + zingo-cli (Zcash Light Client)
+v0.9.0 - Engine migration: zecwallet-cli (2021, abandoned) replaced with
+zingo-cli built at a pinned Ironwood-ready zingolib commit, ahead of the
+NU6.3 activation on 2026-07-28. Endpoint moved to a maintained lightwalletd.
+Seed-only auth and sealed wallets carry over from v0.8.0 unchanged.
 
 The seed phrase is the only credential. Signing in restores or unlocks the
 wallet; signing out seals it. At rest, wallet files live on disk ONLY as an
@@ -25,8 +28,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-CLI = os.getenv("ZECWALLET_CLI", "/app/zecwallet-cli")
-SERVER = os.getenv("LIGHTWALLETD_SERVER", "https://lwdv3.zecwallet.co:443")
+CLI = os.getenv("ZAIM_CLI", os.getenv("ZECWALLET_CLI", "/app/zingo-cli"))
+SERVER = os.getenv("LIGHTWALLETD_SERVER", "https://zec.rocks:443")
 WDIR = os.getenv("WALLET_DIR", "/app/wallets")
 SECRET = os.getenv("API_SECRET", "zaim-secret-prod")
 ADMIN_PASSWORD = os.getenv("ZAIM_ADMIN_PASSWORD", "zaim-admin-2026")
@@ -177,23 +180,29 @@ def load_sessions():
         pass
 
 def wallet_env(wallet_name):
-    """Isolate each user's wallet: zecwallet-cli reads/writes ~/.zcash relative
-    to $HOME, so a per-wallet HOME gives every user a private wallet file.
-    Without this, every user shares one wallet (same seed, same funds)."""
+    """Per-wallet isolation: zingo-cli takes an explicit --data-dir, so every
+    wallet lives in its own directory (zingo-wallet.dat and logs inside)."""
     wdir = os.path.join(WDIR, wallet_name)
     os.makedirs(wdir, exist_ok=True)
     env = dict(os.environ)
     env["HOME"] = wdir
     return wdir, env
 
+_CLI_NOISE = ("Launching ", "Save task", "Zingo CLI quit", "Creating a new wallet")
+
+def _clean_cli_output(out):
+    lines = [l for l in out.split("\n")
+             if l.strip() and not any(l.strip().startswith(p) for p in _CLI_NOISE)]
+    return "\n".join(lines).strip()
+
 def zec(wallet_name, command, args=None):
     wdir, env = wallet_env(wallet_name)
-    cmd = [CLI, "--server", SERVER, command]
+    cmd = [CLI, "--server", SERVER, "--data-dir", wdir, command]
     if args:
         cmd.extend([str(a) for a in args])
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
-        out = r.stdout.strip()
+        out = _clean_cli_output(r.stdout.strip())
         if r.returncode != 0:
             err = r.stderr.strip() or out
             raise HTTPException(500, detail="CLI error: " + err)
@@ -252,6 +261,12 @@ def parse_balance(raw):
                 result[key] = int(val)
             except ValueError:
                 result[key] = val
+    # zingo reports per pool as confirmed_/unconfirmed_/total_; alias to the
+    # canonical names the frontend reads.
+    for pool in ("sapling", "transparent", "orchard"):
+        ck = f"confirmed_{pool}_balance"
+        if ck in result:
+            result.setdefault(f"{pool}_balance", result[ck])
     return result
 
 def parse_transactions(raw):
@@ -292,30 +307,6 @@ def parse_transactions(raw):
                 current[key] = val
     return txns
 
-def extract_addrs(addr_result):
-    z_addr = ""
-    t_addr = ""
-    ua_addr = ""
-    if isinstance(addr_result, dict):
-        ua_list = addr_result.get("ua_addresses", [])
-        z_list = addr_result.get("z_addresses", [])
-        t_list = addr_result.get("t_addresses", [])
-        ua_addr = ua_list[0] if ua_list else ""
-        z_addr = z_list[0] if z_list else ua_addr
-        t_addr = t_list[0] if t_list else ""
-    elif isinstance(addr_result, list):
-        for a in addr_result:
-            if isinstance(a, dict):
-                ua_addr = a.get("encoded_address", a.get("address", ""))
-                rec = a.get("receivers", {})
-                if rec:
-                    t_addr = rec.get("transparent", "")
-                    z_addr = rec.get("sapling", "")
-                if not z_addr:
-                    z_addr = ua_addr
-                break
-    return z_addr, t_addr, ua_addr
-
 def extract_t_addr(t_result):
     if isinstance(t_result, list):
         for a in t_result:
@@ -332,8 +323,8 @@ async def sync_and_cache(wallet_name):
         await azec(wallet_name, "sync", ["run"])
         bal = await azec(wallet_name, "balance")
         parsed_bal = parse_balance(bal)
-        txs = await azec(wallet_name, "transactions")
-        parsed_txs = parse_transactions(txs)
+        txs = await azec(wallet_name, "value_transfers")
+        parsed_txs = txs if isinstance(txs, list) else parse_transactions(txs)
         await azec(wallet_name, "save")
         wallet_cache[wallet_name] = {
             "balance": parsed_bal,
@@ -353,7 +344,7 @@ async def auto_shield(wallet_name):
         bal = cached.get("balance", {})
         t_bal = bal.get("confirmed_transparent_balance", bal.get("tbalance", 0))
         if isinstance(t_bal, int) and t_bal > 20000:
-            await azec(wallet_name, "shield")
+            await azec(wallet_name, "quickshield")
     except Exception:
         pass
 
@@ -472,25 +463,89 @@ async def health():
                 active += 1
             elif e.endswith(".sealed"):
                 sealed += 1
-    return {"status": "ok" if cli_ok else "degraded", "backend": "zecwallet-cli v1.8 (light client)",
+    return {"status": "ok" if cli_ok else "degraded", "backend": "zingo-cli (light client)",
             "server": SERVER, "cli_available": cli_ok, "wallets_active": active,
             "wallets_sealed": sealed, "wallets": active + sealed, "sessions": len(sessions)}
 
+def _meta_path(wn):
+    return os.path.join(WDIR, wn, "zaim-meta.json")
+
+def _addr_from_new_address(res):
+    """new_address returns a JSON object describing the created address; the
+    encoded string key has shifted across zingolib versions, so hunt for it."""
+    if isinstance(res, dict):
+        for k in ("address", "encoded_address", "ua", "unified_address"):
+            v = res.get(k)
+            if isinstance(v, str) and len(v) > 20:
+                return v
+        for v in res.values():
+            if isinstance(v, str) and (v.startswith("u1") or v.startswith("zs1") or v.startswith("t1")):
+                return v
+        raw = res.get("raw", "")
+        m = re.search(r"(u1[0-9a-z]{20,}|zs1[0-9a-z]{20,})", str(raw))
+        if m:
+            return m.group(1)
+    if isinstance(res, list):
+        for item in reversed(res):
+            a = _addr_from_new_address(item)
+            if a:
+                return a
+    return ""
+
 async def _read_addresses(wn):
-    z_addr = t_addr = ua_addr = ""
-    for _ in range(3):
+    """Addresses are derived once and cached in zaim-meta.json INSIDE the
+    wallet dir, so they seal and unseal with the wallet. Derivation order is
+    fixed (z then oz), so a fresh restore of the same seed reproduces the
+    same addresses."""
+    try:
+        with open(_meta_path(wn)) as f:
+            m = json.load(f)
+        if m.get("z_address") or m.get("t_address"):
+            return m.get("z_address", ""), m.get("t_address", ""), m.get("ua_address", "")
+    except Exception:
+        pass
+    z = t = ua = ""
+    try:
+        t = extract_t_addr(await azec(wn, "t_addresses"))
+    except Exception:
+        pass
+    try:
+        z = _addr_from_new_address(await azec(wn, "new_address", ["z"]))
+    except Exception:
+        pass
+    try:
+        ua = _addr_from_new_address(await azec(wn, "new_address", ["oz"]))
+    except Exception:
+        pass
+    if z or t:
         try:
-            addr_result = await azec(wn, "addresses")
-            t_result = await azec(wn, "t_addresses")
-            z_addr, t_addr, ua_addr = extract_addrs(addr_result)
-            if not t_addr:
-                t_addr = extract_t_addr(t_result)
-            if z_addr and t_addr:
-                break
+            with open(_meta_path(wn), "w") as f:
+                json.dump({"z_address": z, "t_address": t, "ua_address": ua}, f)
         except Exception:
             pass
-        await asyncio.sleep(2)
-    return z_addr, t_addr, ua_addr
+    return z, t, ua
+
+def _parse_recovery(res):
+    """recovery_info prints pseudo JSON with unquoted keys; regex it out."""
+    if isinstance(res, dict) and res.get("seed"):
+        return str(res.get("seed", "")), int(res.get("birthday", 0) or 0)
+    raw = res.get("raw", "") if isinstance(res, dict) else str(res)
+    m = re.search(r"seed phrase:\s*([a-z]+(?: [a-z]+){11,32})", raw)
+    mb = re.search(r"birthday:\s*(\d+)", raw)
+    return (m.group(1).strip() if m else ""), (int(mb.group(1)) if mb else 0)
+
+def _extract_txid(result):
+    """quicksend output: {"txids": [..]} or txid text; require 64 hex chars."""
+    if isinstance(result, dict):
+        v = result.get("txid") or result.get("txids")
+        if isinstance(v, list) and v:
+            v = v[0]
+        if isinstance(v, str) and re.fullmatch(r"[0-9a-fA-F]{64}", v):
+            return v
+        m = re.search(r"[0-9a-fA-F]{64}", str(result.get("raw", "")))
+        if m:
+            return m.group(0)
+    return ""
 
 def _new_session(wn, z_addr, t_addr, ua_addr):
     token = str(uuid.uuid4())
@@ -507,11 +562,8 @@ async def create_wallet():
     tmp_wn = "new_" + secrets.token_hex(8)
     await azec(tmp_wn, "sync", ["run"])
     await asyncio.sleep(3)
-    seed_result = await azec(tmp_wn, "seed")
-    seed_text, birthday = "", 0
-    if isinstance(seed_result, dict):
-        seed_text = seed_result.get("seed", "")
-        birthday = seed_result.get("birthday", 0)
+    seed_result = await azec(tmp_wn, "recovery_info")
+    seed_text, birthday = _parse_recovery(seed_result)
     if not seed_text:
         shutil.rmtree(os.path.join(WDIR, tmp_wn), ignore_errors=True)
         raise HTTPException(500, detail="Wallet creation failed. No seed was produced")
@@ -552,7 +604,7 @@ async def open_wallet(req: OpenReq):
         else:
             # Fresh restore from seed. The seed goes to the CLI process only.
             _, env = wallet_env(wn)
-            restore_cmd = [CLI, "--server", SERVER, "--seed", norm]
+            restore_cmd = [CLI, "--server", SERVER, "--data-dir", wdir, "--seed", norm]
             if req.birthday > 0:
                 restore_cmd += ["--birthday", str(req.birthday)]
             restore_cmd += ["sync", "run"]
@@ -646,7 +698,7 @@ async def send_payment(req: SendReq, session=Depends(get_session)):
         fee_zats = max(FEE_MIN_ZATS, zatoshis * FEE_BPS // 10000)
         if fee_zats > 0:
             outputs.append({"address": FEE_ADDRESS, "amount": fee_zats})
-    result = await azec(wn, "send", [json.dumps(outputs)])
+    result = await azec(wn, "quicksend", [json.dumps(outputs)])
     await azec(wn, "save")
     wallet_cache.pop(wn, None)
     return {"result": result, "to": req.to_address, "amount": req.amount, "zatoshis": zatoshis,
@@ -656,7 +708,7 @@ async def send_payment(req: SendReq, session=Depends(get_session)):
 async def send_message(req: MsgReq, session=Depends(get_session)):
     wn = session["wallet_name"]
     outputs = [{"address": req.to_address, "amount": DUST, "memo": req.message}]
-    result = await azec(wn, "send", [json.dumps(outputs)])
+    result = await azec(wn, "quicksend", [json.dumps(outputs)])
     await azec(wn, "save")
     wallet_cache.pop(wn, None)
     return {"result": result, "to": req.to_address, "message_preview": req.message[:50]}
@@ -665,11 +717,14 @@ async def send_message(req: MsgReq, session=Depends(get_session)):
 async def get_messages(session=Depends(get_session)):
     wn = session["wallet_name"]
     try:
-        txs = await azec(wn, "transactions")
-        parsed = parse_transactions(txs)
+        txs = await azec(wn, "value_transfers")
+        parsed = txs if isinstance(txs, list) else parse_transactions(txs)
         messages = []
         for tx in parsed:
-            memo = tx.get("memo")
+            if not isinstance(tx, dict):
+                continue
+            memos = tx.get("memos")
+            memo = (memos[0] if isinstance(memos, list) and memos else None) or tx.get("memo")
             if memo:
                 messages.append({
                     "memo": memo,
@@ -677,7 +732,8 @@ async def get_messages(session=Depends(get_session)):
                     "datetime": tx.get("datetime", ""),
                     "height": tx.get("blockheight", ""),
                     "amount": (tx.get("value", 0) / 1e8) if isinstance(tx.get("value"), int) else 0,
-                    "sent": tx.get("kind", "") in ("send", "send-to-self"),
+                    "sent": str(tx.get("kind", "")).lower().replace("-", "").replace("_", "")
+                            in ("send", "sent", "sendtoself", "memotoself"),
                 })
         return {"messages": messages, "count": len(messages)}
     except Exception:
@@ -694,8 +750,8 @@ async def get_transactions(session=Depends(get_session)):
         asyncio.create_task(sync_and_cache(wn))
         return {"transactions": cached_txs}
     try:
-        txs = await azec(wn, "transactions")
-        parsed = parse_transactions(txs)
+        txs = await azec(wn, "value_transfers")
+        parsed = txs if isinstance(txs, list) else parse_transactions(txs)
         wallet_cache.setdefault(wn, {})["transactions"] = parsed
         return {"transactions": parsed}
     except Exception:
@@ -703,12 +759,9 @@ async def get_transactions(session=Depends(get_session)):
 
 @app.get("/api/wallet/seed")
 async def get_seed(session=Depends(get_session)):
-    result = await azec(session["wallet_name"], "seed")
-    if isinstance(result, dict):
-        seed_text = result.get("seed", "")
-        birthday = result.get("birthday", 0)
-        return {"seed": seed_text, "birthday": birthday}
-    return result
+    result = await azec(session["wallet_name"], "recovery_info")
+    seed_text, birthday = _parse_recovery(result)
+    return {"seed": seed_text, "birthday": birthday}
 
 @app.get("/api/node/info")
 async def node_info():
@@ -972,20 +1025,14 @@ async def swap_execute(req: SwapExecuteReq, session=Depends(get_session)):
     wn = session["wallet_name"]
     zats = int(rec["amount_units"])
     outputs = [{"address": rec["deposit_address"], "amount": zats}]
-    result = await azec(wn, "send", [json.dumps(outputs)])
+    result = await azec(wn, "quicksend", [json.dumps(outputs)])
     await azec(wn, "save")
     wallet_cache.pop(wn, None)
-    txid = ""
+    txid = _extract_txid(result)
     err_text = ""
-    if isinstance(result, dict):
-        txid = str(result.get("txid", "") or "")
-        raw = str(result.get("raw", "") or result.get("error", "") or "")
-        if not txid and raw:
-            m = re.search(r'"txid"\s*:\s*"([0-9a-fA-F]{32,64})"', raw)
-            txid = m.group(1) if m else ""
-            if not txid:
-                err_text = raw[:200]
-    if not re.fullmatch(r"[0-9a-fA-F]{32,64}", txid):
+    if not txid and isinstance(result, dict):
+        err_text = str(result.get("raw", "") or result.get("error", ""))[:200]
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", txid or "x"):
         # zecwallet-cli exits 0 on some failures (e.g. insufficient funds) and
         # only reports the problem in its output. No txid means NOTHING was
         # broadcast — refuse loudly and keep the swap READY_TO_SEND so a

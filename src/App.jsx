@@ -249,8 +249,10 @@ function HomeScreen({ onNav }) {
       ) : txs.map((tx, i) => {
         const rawVal = tx.value || tx.amount || 0;
         const zec = Math.abs(typeof rawVal === "number" ? rawVal / 1e8 : parseFloat(rawVal || 0) / 1e8);
-        const isIn = !(tx.kind && (tx.kind === "send" || tx.kind === "send-to-self"));
-        const self = tx.kind === "send-to-self";
+        const kind = String(tx.kind || "").toLowerCase().replace(/[-_ ]/g, "");
+        const self = kind.includes("self");
+        const isIn = !self && !kind.startsWith("sen");
+        tx.memo = tx.memo || (Array.isArray(tx.memos) && tx.memos.length ? tx.memos[0] : "");
         return (
           <div key={i} className="mp-row">
             <div style={{ width: 64, height: 40, display: "flex", alignItems: "center", justifyContent: "center", background: self ? T.black : isIn ? T.teal : T.red, color: self ? T.white : isIn ? T.black : T.white, fontFamily: F.display, fontWeight: 800, fontSize: 12, letterSpacing: .5, flexShrink: 0 }}>{self ? "SELF" : isIn ? "IN" : "OUT"}</div>
@@ -449,7 +451,7 @@ function SettingsScreen({ onLogout, onAdmin }) {
         <span className="mp-lbl-sm">SEALING ENCRYPTS YOUR WALLET ON THE SERVER. ONLY YOUR SEED REOPENS IT.</span>
       </div>
       <div style={{ padding: "8px 16px 20px", textAlign: "center" }}>
-        <span onClick={onAdmin} className="mp-lbl-sm" style={{ userSelect: "none", cursor: "default", color: T.black, opacity: .5 }}>ZAIM v0.8.0</span>
+        <span onClick={onAdmin} className="mp-lbl-sm" style={{ userSelect: "none", cursor: "default", color: T.black, opacity: .5 }}>ZAIM v0.9.0</span>
       </div>
     </div>
   );
