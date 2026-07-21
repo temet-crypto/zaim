@@ -156,7 +156,6 @@ function AuthScreen({ onAuth }) {
           </div>
           {error && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase", letterSpacing: .5 }}>{error}</div>}
           <button className="mp-btn" onClick={submit} disabled={loading}>{loading ? (restoring ? "OPENING… A FIRST RESTORE CAN TAKE MINUTES" : "…") : "OPEN WALLET"}</button>
-          <div className="mp-lbl-sm" style={{ textAlign: "center" }}>NO USERNAME. NO PASSWORD. THE SEED IS THE ACCOUNT.</div>
         </div>
       ) : (
         <div className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
