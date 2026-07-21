@@ -32,6 +32,15 @@ const API = {
   nodeInfo: () => API.get("/node/info"),
 };
 
+// Dev log shown on the sign in screen. ZAIM entries only. Newest first.
+// The status bar shows the first sentence of the newest entry.
+const ZAIM_LOG = [
+  { d: "Jul 20 2026", v: "0.9.0", t: "New wallet engine, built and tested ahead of the July 28 Ironwood network upgrade. Wallet infrastructure moved to a maintained server." },
+  { d: "Jul 19 2026", v: "0.8.0", t: "Seed only sign in. No usernames, no passwords, no accounts. Signing out seals your wallet with encryption derived from your own seed." },
+  { d: "Jul 18 2026", v: "0.7.0", t: "Cross chain swaps. Buy and sell ZEC with BTC, ETH, SOL or USDC through NEAR Intents. Unfunded swaps can be cancelled any time." },
+  { d: "Jul 16 2026", v: "0.5.0", t: "Security hardening. Wallet isolation, safer file handling, and reliable payments and messages." },
+];
+
 // Contacts live on THIS device only. No account, no server copy.
 const Contacts = {
   list: () => { try { return JSON.parse(localStorage.getItem("zaim_contacts") || "[]"); } catch (e) { return []; } },
@@ -54,6 +63,7 @@ function AuthScreen({ onAuth }) {
   const [loading, setLoading] = useState(false); const [error, setError] = useState("");
   const [seed, setSeed] = useState("");
   const [restoring, setRestoring] = useState(false);
+  const [showLog, setShowLog] = useState(false);
   const [price, setPrice] = useState(null);
   useEffect(() => {
     let alive = true;
@@ -77,6 +87,27 @@ function AuthScreen({ onAuth }) {
     } catch (e) { setError(e.message); }
     setLoading(false); setRestoring(false);
   };
+  if (showLog) return (
+    <div className="mp-scroll">
+      <div className="mp-head">
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <BackArrow onClick={() => setShowLog(false)} />
+          <div className="mp-title">Dev Log</div>
+        </div>
+        <div className="mp-meta" style={{ color: T.blue }}>ZAIM</div>
+      </div>
+      {ZAIM_LOG.map((e, i) => (
+        <div key={i} style={{ background: T.white, borderBottom: `2px solid ${T.black}`, padding: "14px 16px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+            <span style={{ fontFamily: F.mono, fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase" }}>{e.d}</span>
+            <span style={{ fontFamily: F.display, fontWeight: 800, fontSize: 12, letterSpacing: .5, padding: "3px 8px", background: T.blue, color: T.white, textTransform: "uppercase" }}>ZAIM {e.v}</span>
+          </div>
+          <div style={{ fontFamily: F.body, fontSize: 14, lineHeight: 1.5 }}>{e.t}</div>
+        </div>
+      ))}
+      <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">Small releases, shipped often.</span></div>
+    </div>
+  );
   if (seed) return (
     <div className="mp-scroll">
       <div className="mp-section">BACKUP YOUR SEED</div>
@@ -134,6 +165,11 @@ function AuthScreen({ onAuth }) {
           <button className="mp-btn" onClick={submit} disabled={loading}>{loading ? "CREATING…" : "CREATE NEW WALLET"}</button>
         </div>
       )}
+      <div onClick={() => setShowLog(true)} style={{ display: "flex", alignItems: "baseline", gap: 12, margin: "24px 16px 20px", padding: "13px 16px", background: T.black, color: T.off, border: `2px solid ${T.black}`, cursor: "pointer", fontFamily: F.mono, fontSize: 11, letterSpacing: 1 }}>
+        <span style={{ color: T.teal, textTransform: "uppercase", letterSpacing: 2, flexShrink: 0 }}>Dev log</span>
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{`ZAIM ${ZAIM_LOG[0].v}. ${ZAIM_LOG[0].t.split(". ")[0]}.`}</span>
+        <span style={{ opacity: .7, textTransform: "uppercase", flexShrink: 0 }}>{ZAIM_LOG[0].d.slice(0, 6)}</span>
+      </div>
     </div>
   );
 }
