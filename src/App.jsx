@@ -147,7 +147,7 @@ function AuthScreen({ onAuth }) {
       {mode === "open" ? (
         <div className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div>
-            <div className="mp-lbl-sm" style={{ marginBottom: 6 }}>SEED PHRASE · YOUR ONLY KEY</div>
+            <div className="mp-lbl-sm" style={{ marginBottom: 6 }}>SEED PHRASE</div>
             <textarea className="mp-input" rows={4} value={seedIn} onChange={e => setSeedIn(e.target.value)} placeholder="Paste your 24 words" style={{ resize: "none", fontFamily: F.mono, fontSize: 13, lineHeight: 1.6 }} />
           </div>
           <div>
