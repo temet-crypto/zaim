@@ -164,10 +164,8 @@ function AuthScreen({ onAuth }) {
           <button className="mp-btn" onClick={submit} disabled={loading}>{loading ? "CREATING…" : "CREATE NEW WALLET"}</button>
         </div>
       )}
-      <div onClick={() => setShowLog(true)} style={{ display: "flex", alignItems: "baseline", gap: 12, margin: "24px 16px 20px", padding: "13px 16px", background: T.black, color: T.off, border: `2px solid ${T.black}`, cursor: "pointer", fontFamily: F.mono, fontSize: 11, letterSpacing: 1 }}>
-        <span style={{ color: T.teal, textTransform: "uppercase", letterSpacing: 2, flexShrink: 0 }}>Dev log</span>
-        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{`ZAIM ${ZAIM_LOG[0].v}. ${ZAIM_LOG[0].t.split(". ")[0]}.`}</span>
-        <span style={{ opacity: .7, textTransform: "uppercase", flexShrink: 0 }}>{ZAIM_LOG[0].d.slice(0, 6)}</span>
+      <div style={{ padding: "24px 16px 20px" }}>
+        <button className="mp-btn" onClick={() => setShowLog(true)}>DEV LOG</button>
       </div>
     </div>
   );
