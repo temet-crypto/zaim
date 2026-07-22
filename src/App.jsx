@@ -165,7 +165,7 @@ function AuthScreen({ onAuth }) {
         </div>
       )}
       <div style={{ padding: "24px 16px 20px" }}>
-        <button className="mp-btn" onClick={() => setShowLog(true)}>DEV LOG</button>
+        <button className="mp-btn" onClick={() => setShowLog(true)} style={{ background: "none", color: T.black, border: `2px solid ${T.black}` }}>DEV LOG</button>
       </div>
     </div>
   );
