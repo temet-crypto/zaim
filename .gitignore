@@ -7,3 +7,5 @@ certbot/
 *.log
 .env*
 zingo-cli
+__pycache__/
+*.pyc

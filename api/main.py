@@ -31,7 +31,6 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 CLI = os.getenv("ZAIM_CLI", os.getenv("ZECWALLET_CLI", "/app/zingo-cli"))
 SERVER = os.getenv("LIGHTWALLETD_SERVER", "https://zec.rocks:443")
 WDIR = os.getenv("WALLET_DIR", "/app/wallets")
-SECRET = os.getenv("API_SECRET", "zaim-secret-prod")
 ADMIN_PASSWORD = os.getenv("ZAIM_ADMIN_PASSWORD", "zaim-admin-2026")
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv(
     "ALLOWED_ORIGINS",
@@ -53,7 +52,6 @@ def _warn_default_secret(name, value, default):
     if value == default:
         print(f"[SECURITY] {name} is using the built-in default — set it via env in production.", flush=True)
 
-_warn_default_secret("API_SECRET", SECRET, "zaim-secret-prod")
 _warn_default_secret("ZAIM_ADMIN_PASSWORD", ADMIN_PASSWORD, "zaim-admin-2026")
 
 sessions = {}
