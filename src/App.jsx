@@ -105,6 +105,42 @@ function AuthScreen({ onAuth }) {
           <div style={{ fontFamily: F.body, fontSize: 14, lineHeight: 1.5 }}>{e.t}</div>
         </div>
       ))}
+
+      <div className="mp-section">WHAT IT RUNS ON</div>
+      {[
+        ["NETWORK", "Zcash mainnet", "z.cash", "https://z.cash"],
+        ["ENGINE", "zingolib wallet core", "github.com/zingolabs/zingolib", "https://github.com/zingolabs/zingolib"],
+        ["SERVER", "zec.rocks lightwalletd", "zec.rocks", "https://zec.rocks"],
+        ["SWAPS", "NEAR Intents", "near-intents.org", "https://near-intents.org"],
+      ].map(([k, name, label, url]) => (
+        <a key={k} href={url} target="_blank" rel="noreferrer" style={{ display: "flex", gap: 12, alignItems: "baseline", padding: "12px 16px", borderBottom: `2px solid ${T.black}`, background: T.white, textDecoration: "none", color: T.black }}>
+          <span style={{ fontFamily: F.mono, fontSize: 10, letterSpacing: 1.5, color: T.blue, flexShrink: 0, paddingTop: 2, width: 62 }}>{k}</span>
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ display: "block", fontFamily: F.body, fontWeight: 600, fontSize: 14 }}>{name}</span>
+            <span style={{ display: "block", fontFamily: F.mono, fontSize: 11, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label} ↗</span>
+          </span>
+        </a>
+      ))}
+
+      <div className="mp-section">YOUR KEYS</div>
+      <div className="mp-band mp-band-w">
+        <div className="mp-quip">Your seed is a standard Zcash seed. It opens the same wallet in Zashi, Ywallet, or any Zcash wallet. You can leave any time.</div>
+      </div>
+
+      <div className="mp-section">OPEN SOURCE</div>
+      <a href="https://github.com/temet-crypto/zaim" target="_blank" rel="noreferrer" style={{ display: "flex", gap: 12, alignItems: "baseline", padding: "12px 16px", borderBottom: `2px solid ${T.black}`, background: T.white, textDecoration: "none", color: T.black }}>
+        <span style={{ fontFamily: F.mono, fontSize: 10, letterSpacing: 1.5, color: T.blue, flexShrink: 0, paddingTop: 2, width: 62 }}>CODE</span>
+        <span style={{ flex: 1, minWidth: 0 }}>
+          <span style={{ display: "block", fontFamily: F.body, fontWeight: 600, fontSize: 14 }}>Read every line. MIT licensed.</span>
+          <span style={{ display: "block", fontFamily: F.mono, fontSize: 11, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>github.com/temet-crypto/zaim ↗</span>
+        </span>
+      </a>
+      <div style={{ background: T.white, borderBottom: `2px solid ${T.black}`, padding: "12px 16px" }}>
+        <div style={{ fontFamily: F.body, fontSize: 13, lineHeight: 1.5, color: T.black }}>
+          Honest note: ZAIM is not decentralized. It is a custodial app on one server. While you are signed in, the server holds your keys. When you sign out, your wallet is sealed and encrypted so the server cannot open it.
+        </div>
+      </div>
+
       <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">Small releases, shipped often.</span></div>
     </div>
   );
