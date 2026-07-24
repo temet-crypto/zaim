@@ -135,13 +135,6 @@ function AuthScreen({ onAuth }) {
           <span style={{ display: "block", fontFamily: F.mono, fontSize: 11, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>github.com/temet-crypto/zaim ↗</span>
         </span>
       </a>
-      <div style={{ background: T.white, borderBottom: `2px solid ${T.black}`, padding: "12px 16px" }}>
-        <div style={{ fontFamily: F.body, fontSize: 13, lineHeight: 1.5, color: T.black }}>
-          Honest note: ZAIM is not decentralized. It is a custodial app on one server. While you are signed in, the server holds your keys. When you sign out, your wallet is sealed and encrypted so the server cannot open it.
-        </div>
-      </div>
-
-      <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">Small releases, shipped often.</span></div>
     </div>
   );
   if (seed) return (
