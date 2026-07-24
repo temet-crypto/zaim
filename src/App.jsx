@@ -41,6 +41,11 @@ const ZAIM_LOG = [
   { d: "Jul 16 2026", v: "0.5.0", t: "Security hardening. Wallet isolation, safer file handling, and reliable payments and messages." },
 ];
 
+// What we are working toward. Shown under the dev log. Newest plans first.
+const ZAIM_UPCOMING = [
+  { k: "NODE", title: "Run our own node", t: "Right now your wallet talks to a shared Zcash server. We plan to run our own, so your addresses and activity pass through fewer hands." },
+];
+
 // Contacts live on THIS device only. No account, no server copy.
 const Contacts = {
   list: () => { try { return JSON.parse(localStorage.getItem("zaim_contacts") || "[]"); } catch (e) { return []; } },
@@ -135,6 +140,17 @@ function AuthScreen({ onAuth }) {
           <span style={{ display: "block", fontFamily: F.mono, fontSize: 11, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>github.com/temet-crypto/zaim ↗</span>
         </span>
       </a>
+
+      <div className="mp-section">UPCOMING</div>
+      {ZAIM_UPCOMING.map((u) => (
+        <div key={u.k} style={{ display: "flex", gap: 12, alignItems: "baseline", padding: "12px 16px", borderBottom: `2px solid ${T.black}`, background: T.white }}>
+          <span style={{ fontFamily: F.mono, fontSize: 10, letterSpacing: 1.5, color: T.blue, flexShrink: 0, paddingTop: 2, width: 62 }}>SOON</span>
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ display: "block", fontFamily: F.body, fontWeight: 600, fontSize: 14 }}>{u.title}</span>
+            <span style={{ display: "block", fontFamily: F.body, fontSize: 13, lineHeight: 1.5, marginTop: 3 }}>{u.t}</span>
+          </span>
+        </div>
+      ))}
     </div>
   );
   if (seed) return (
