@@ -2,7 +2,9 @@ import ZAIMGeoVault from "./GeoVault.jsx";
 import ZaimSwap from "./Swap.jsx";
 import { useState, useEffect, useRef, useCallback } from "react";
 import AdminDashboard from "./AdminDashboard";
+import FeaturesScreen from "./Features.jsx";
 import { T, F, MAXPAIN_CSS } from "./styles/maxpain.js";
+import { apiGet, apiPost, takeNotice } from "./api.js";
 
 // four geometric primitives for the bottom nav (icon always white)
 const Prim = {
@@ -14,9 +16,8 @@ const Prim = {
 
 const API = {
   token: () => localStorage.getItem("zaim_token"),
-  headers: () => ({ "Content-Type": "application/json", ...(localStorage.getItem("zaim_token") ? { Authorization: `Bearer ${localStorage.getItem("zaim_token")}` } : {}) }),
-  async post(p, b) { const r = await fetch(`/api${p}`, { method: "POST", headers: this.headers(), body: JSON.stringify(b) }); const d = await r.json(); if (!r.ok) throw new Error(d.detail || "Failed"); return d; },
-  async get(p) { const r = await fetch(`/api${p}`, { headers: this.headers() }); const d = await r.json(); if (!r.ok) throw new Error(d.detail || "Failed"); return d; },
+  post: apiPost,
+  get: apiGet,
   createWallet: () => API.post("/wallet/create", {}),
   openWallet: (seed, birthday) => API.post("/wallet/open", { seed_phrase: seed, birthday: birthday || 0 }),
   logout: () => API.post("/wallet/logout", {}),
@@ -35,6 +36,7 @@ const API = {
 // Dev log shown on the sign in screen. ZAIM entries only. Newest first.
 // The status bar shows the first sentence of the newest entry.
 const ZAIM_LOG = [
+  { d: "Jul 30 2026", v: "0.9.1", t: "Privacy and honesty pass. Fonts now load from our own server, so opening ZAIM tells nobody else you did. Messages thread by contact with a reply address inside the memo. Payment fees show before you send. Vault escrow now verifies funding on chain before a vault arms." },
   { d: "Jul 20 2026", v: "0.9.0", t: "New wallet engine, built and tested ahead of the July 28 Ironwood network upgrade. Wallet infrastructure moved to a maintained server." },
   { d: "Jul 19 2026", v: "0.8.0", t: "Seed only sign in. No usernames, no passwords, no accounts. Signing out seals your wallet with encryption derived from your own seed." },
   { d: "Jul 18 2026", v: "0.7.0", t: "Cross chain swaps. Buy and sell ZEC with BTC, ETH, SOL or USDC through NEAR Intents. Unfunded swaps can be cancelled any time." },
@@ -69,7 +71,9 @@ function AuthScreen({ onAuth }) {
   const [seed, setSeed] = useState("");
   const [restoring, setRestoring] = useState(false);
   const [showLog, setShowLog] = useState(false);
+  const [showFeatures, setShowFeatures] = useState(false);
   const [price, setPrice] = useState(null);
+  const [notice] = useState(takeNotice); // why the last session ended, if the server said
   useEffect(() => {
     let alive = true;
     const load = async () => { try { const p = await API.getPrice(); if (alive) setPrice(p); } catch (e) { } };
@@ -92,6 +96,7 @@ function AuthScreen({ onAuth }) {
     } catch (e) { setError(e.message); }
     setLoading(false); setRestoring(false);
   };
+  if (showFeatures) return <FeaturesScreen onBack={() => setShowFeatures(false)} />;
   if (showLog) return (
     <div className="mp-scroll">
       <div className="mp-head">
@@ -182,6 +187,11 @@ function AuthScreen({ onAuth }) {
           </div>
         )}
       </div>
+      {notice && (
+        <div style={{ padding: "12px 16px", borderBottom: `2px solid ${T.black}`, background: T.blueTint }}>
+          <span style={{ fontFamily: F.mono, fontSize: 11, letterSpacing: .5, textTransform: "uppercase" }}>{notice}</span>
+        </div>
+      )}
       <div style={{ display: "flex", borderBottom: `2px solid ${T.black}` }}>
         {["open", "create"].map((m, i) => (
           <div key={m} onClick={() => { setMode(m); setError(""); }} style={{ flex: 1, padding: "14px 0", textAlign: "center", cursor: "pointer", fontFamily: F.display, fontWeight: 800, fontSize: 18, textTransform: "uppercase", letterSpacing: .5, borderRight: i === 0 ? `2px solid ${T.black}` : "none", background: mode === m ? T.blue : T.off, color: mode === m ? T.white : T.black }}>
@@ -209,8 +219,9 @@ function AuthScreen({ onAuth }) {
           <button className="mp-btn" onClick={submit} disabled={loading}>{loading ? "CREATING…" : "CREATE NEW WALLET"}</button>
         </div>
       )}
-      <div style={{ padding: "24px 16px 20px" }}>
+      <div style={{ padding: "24px 16px 20px", display: "flex", flexDirection: "column", gap: 10 }}>
         <button className="mp-btn" onClick={() => setShowLog(true)} style={{ background: "none", color: T.black, border: `2px solid ${T.black}` }}>DEV LOG</button>
+        <button className="mp-btn" onClick={() => setShowFeatures(true)} style={{ background: "none", color: T.blue, border: `2px solid ${T.blue}` }}>FEATURES</button>
       </div>
     </div>
   );
@@ -281,7 +292,7 @@ function HomeScreen({ onNav }) {
         </button>
       } />
       <div className="mp-band" style={{ paddingTop: 20, paddingBottom: 18 }}>
-        <div className="mp-lbl" style={{ marginBottom: 10 }}>SHIELDED BALANCE · ALL</div>
+        <div className="mp-lbl" style={{ marginBottom: 10 }}>BALANCE · ALL POOLS</div>
         <div className="mp-big">{loading ? "···" : bal.total}</div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
           <span className="mp-lbl">ZEC TOTAL</span>
@@ -330,7 +341,7 @@ function HomeScreen({ onNav }) {
         const kind = String(tx.kind || "").toLowerCase().replace(/[-_ ]/g, "");
         const self = kind.includes("self");
         const isIn = !self && !kind.startsWith("sen");
-        tx.memo = tx.memo || (Array.isArray(tx.memos) && tx.memos.length ? tx.memos[0] : "");
+        tx.memo = (tx.memo || (Array.isArray(tx.memos) && tx.memos.length ? tx.memos[0] : "") || "").split("\nReply-to:")[0];
         return (
           <div key={i} className="mp-row">
             <div style={{ width: 64, height: 40, display: "flex", alignItems: "center", justifyContent: "center", background: self ? T.black : isIn ? T.teal : T.red, color: self ? T.white : isIn ? T.black : T.white, fontFamily: F.display, fontWeight: 800, fontSize: 12, letterSpacing: .5, flexShrink: 0 }}>{self ? "SELF" : isIn ? "IN" : "OUT"}</div>
@@ -350,6 +361,9 @@ function HomeScreen({ onNav }) {
 function SendScreen({ onBack }) {
   const [to, setTo] = useState(""); const [amount, setAmount] = useState(""); const [memo, setMemo] = useState("");
   const [loading, setLoading] = useState(false); const [result, setResult] = useState(null); const [error, setError] = useState("");
+  const [feeBps, setFeeBps] = useState(0);
+  // The server discloses its fee; the screen repeats it BEFORE the send button.
+  useEffect(() => { API.health().then(h => setFeeBps(h.fee_bps || 0)).catch(() => { }); }, []);
   const send = async () => {
     if (!to) return setError("Enter address");
     if (!amount || parseFloat(amount) <= 0) return setError("Enter amount");
@@ -363,7 +377,7 @@ function SendScreen({ onBack }) {
       <div className="mp-band-blue" style={{ padding: "40px 16px", borderBottom: `2px solid ${T.black}` }}>
         <div className="mp-lbl" style={{ color: T.white, marginBottom: 10 }}>PAYMENT BROADCAST</div>
         <div className="mp-big" style={{ color: T.white }}>{amount}</div>
-        <div className="mp-lbl" style={{ color: T.white, marginTop: 12 }}>ZEC SENT</div>
+        <div className="mp-lbl" style={{ color: T.white, marginTop: 12 }}>ZEC SENT{result.fee_zec > 0 ? ` · APP FEE ${Number(result.fee_zec).toFixed(6)} ZEC` : ""}</div>
       </div>
       <div className="mp-band"><div className="mp-quip">Shielded and on its way.</div></div>
       <div style={{ padding: 16 }}><button className="mp-btn" onClick={onBack}>DONE</button></div>
@@ -374,8 +388,12 @@ function SendScreen({ onBack }) {
       <div className="mp-head"><div style={{ display: "flex", alignItems: "center", gap: 12 }}><BackArrow onClick={onBack} /><div className="mp-title">Send ZEC</div></div></div>
       <div className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>TO ADDRESS</div><input className="mp-input" value={to} onChange={e => setTo(e.target.value)} placeholder="Shielded or unified address" /></div>
-        <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>AMOUNT · ZEC</div><input className="mp-input" type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.0000" /></div>
-        <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>MEMO · OPTIONAL</div><input className="mp-input" value={memo} onChange={e => setMemo(e.target.value)} placeholder="Encrypted memo on the chain" /></div>
+        <div>
+          <div className="mp-lbl-sm" style={{ marginBottom: 6 }}>AMOUNT · ZEC</div>
+          <input className="mp-input" type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.0000" />
+          {feeBps > 0 && <div className="mp-lbl-sm" style={{ marginTop: 6, color: T.blue }}>A {(feeBps / 100).toFixed(2)}% APP FEE IS ADDED ON TOP. THE RECIPIENT GETS THE FULL AMOUNT</div>}
+        </div>
+        <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>MEMO · OPTIONAL</div><input className="mp-input" value={memo} onChange={e => setMemo(e.target.value)} maxLength={400} placeholder="Encrypted memo on the chain" /></div>
         {error && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase", letterSpacing: .5 }}>{error}</div>}
         <button className="mp-btn" onClick={send} disabled={loading}>{loading ? "SENDING…" : "SEND"}</button>
       </div>
@@ -423,11 +441,26 @@ function MessengerScreen({ onNav }) {
 function ChatScreen({ contact, onBack }) {
   const [input, setInput] = useState(""); const [sending, setSending] = useState(false);
   const [messages, setMessages] = useState([]); const [toast, setToast] = useState(""); const endRef = useRef(null);
-  useEffect(() => { API.getMessages().then(r => { setMessages((r.messages || []).filter(m => m.memo)); }).catch(() => { }); }, []);
+  // This thread: what I sent to THIS address, what came back tagged with THIS
+  // reply address, and incoming memos with no tag at all. The last group is
+  // unattributable (a shielded memo carries no sender unless the sender says),
+  // so those show in every thread, marked, instead of being guessed at.
+  const eq = (a, b) => !!a && !!b && String(a).trim() === String(b).trim();
+  const mine = useCallback((m) => m.sent ? eq(m.to, contact.address) : (m.from ? eq(m.from, contact.address) : true), [contact.address]);
+  const load = useCallback(() => {
+    API.getMessages().then(r => {
+      setMessages((r.messages || []).filter(m => m.memo).filter(mine));
+    }).catch(() => { });
+  }, [mine]);
+  useEffect(() => {
+    load();
+    const t = setInterval(() => { if (!document.hidden) load(); }, 25000);
+    return () => clearInterval(t);
+  }, [load]);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
   const sendMsg = async () => {
     if (!input.trim()) return; setSending(true);
-    try { await API.sendMessage(contact.address, input.trim()); setMessages(p => [...p, { memo: input.trim(), amount: 0.0001, txid: "pending", sent: true }]); setInput(""); setToast("Sent"); setTimeout(() => setToast(""), 2500); }
+    try { await API.sendMessage(contact.address, input.trim()); setMessages(p => [...p, { memo: input.trim(), to: contact.address, amount: 0.0001, txid: "pending", sent: true }]); setInput(""); setToast("Sent"); setTimeout(() => setToast(""), 2500); }
     catch (e) { setToast("Failed: " + e.message); setTimeout(() => setToast(""), 3500); }
     setSending(false);
   };
@@ -452,7 +485,7 @@ function ChatScreen({ contact, onBack }) {
             <div key={i} style={{ marginBottom: 12, display: "flex", justifyContent: me ? "flex-end" : "flex-start" }}>
               <div style={{ maxWidth: "82%", padding: "10px 12px", border: `2px solid ${T.black}`, background: me ? T.blue : T.white, color: me ? T.white : T.black }}>
                 <div style={{ fontFamily: F.body, fontSize: 14, lineHeight: 1.45 }}>{m.memo}</div>
-                <div style={{ fontFamily: F.mono, fontSize: 9, marginTop: 5, letterSpacing: .5, textTransform: "uppercase", opacity: .8 }}>{m.txid === "pending" ? "PENDING" : m.height ? `BLOCK ${m.height}` : ""}{m.amount ? ` · ${m.amount} ZEC` : ""}</div>
+                <div style={{ fontFamily: F.mono, fontSize: 9, marginTop: 5, letterSpacing: .5, textTransform: "uppercase", opacity: .8 }}>{m.txid === "pending" ? "PENDING" : m.height ? `BLOCK ${m.height}` : ""}{m.amount ? ` · ${m.amount} ZEC` : ""}{!me && !m.from ? " · SENDER UNKNOWN" : ""}</div>
               </div>
             </div>
           );
@@ -461,7 +494,7 @@ function ChatScreen({ contact, onBack }) {
       </div>
       <div style={{ borderTop: `2px solid ${T.black}`, background: T.off }}>
         <div style={{ display: "flex", alignItems: "stretch" }}>
-          <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && !sending && sendMsg()} placeholder="Type a message…" style={{ flex: 1, fontFamily: F.mono, fontSize: 14, padding: 14, background: T.white, border: "none", borderRight: `2px solid ${T.black}`, color: T.black, outline: "none" }} />
+          <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && !sending && sendMsg()} maxLength={340} placeholder="Type a message…" style={{ flex: 1, fontFamily: F.mono, fontSize: 14, padding: 14, background: T.white, border: "none", borderRight: `2px solid ${T.black}`, color: T.black, outline: "none" }} />
           <button onClick={() => !sending && sendMsg()} style={{ width: 60, border: "none", background: sending ? T.faint : T.blue, cursor: sending ? "wait" : "pointer", display: "flex", alignItems: "center", justifyContent: "center" }} aria-label="Send">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" stroke="#fff" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" /></svg>
           </button>
@@ -496,7 +529,7 @@ function SettingsScreen({ onLogout, onAdmin }) {
       <div className="mp-section">NETWORK</div>
       <KV k="Status" v={conn ? "ONLINE" : "OFFLINE"} color={conn ? T.teal : T.red} />
       <KVm k="Server" v={srv} />
-      <KVm k="Protocol" v="Shielded · Sapling" color={T.blue} />
+      <KVm k="Protocol" v="Shielded · Sapling + Orchard" color={T.blue} />
       <KVm k="Network" v="Zcash Mainnet" />
       <div className="mp-section">SECURITY</div>
       <KV k="Encryption" v="E2E SHIELDED" color={T.teal} />
@@ -529,7 +562,7 @@ function SettingsScreen({ onLogout, onAdmin }) {
         <span className="mp-lbl-sm">SEALING ENCRYPTS YOUR WALLET ON THE SERVER. ONLY YOUR SEED REOPENS IT.</span>
       </div>
       <div style={{ padding: "8px 16px 20px", textAlign: "center" }}>
-        <span onClick={onAdmin} className="mp-lbl-sm" style={{ userSelect: "none", cursor: "default", color: T.black, opacity: .5 }}>ZAIM v0.9.0</span>
+        <span onClick={onAdmin} className="mp-lbl-sm" style={{ userSelect: "none", cursor: "default", color: T.black, opacity: .5 }}>ZAIM v0.9.1</span>
       </div>
     </div>
   );

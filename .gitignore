@@ -9,3 +9,4 @@ certbot/
 zingo-cli
 __pycache__/
 *.pyc
+*.pem

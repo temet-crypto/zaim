@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { T, F } from "./styles/maxpain.js";
+import { apiGet, apiPost } from "./api.js";
 
 // ── time helpers (unchanged logic) ───────────────────────────────────────────
 function parseT(str) { return str ? new Date(str) : null; }
@@ -28,12 +29,7 @@ function fmtDate(str) {
   return parseT(str).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-const API = {
-  headers: () => ({ "Content-Type": "application/json", ...(localStorage.getItem("zaim_token") ? { Authorization: `Bearer ${localStorage.getItem("zaim_token")}` } : {}) }),
-  async get(p) { const r = await fetch(`/api${p}`, { headers: this.headers() }); const d = await r.json(); if (!r.ok) throw new Error(d.detail || "Failed"); return d; },
-  async post(p, b) { const r = await fetch(`/api${p}`, { method: "POST", headers: this.headers(), body: JSON.stringify(b) }); const d = await r.json(); if (!r.ok) throw new Error(d.detail || "Failed"); return d; },
-  async del(p) { const r = await fetch(`/api${p}`, { method: "DELETE", headers: this.headers() }); const d = await r.json(); if (!r.ok) throw new Error(d.detail || "Failed"); return d; },
-};
+const API = { get: apiGet, post: apiPost };
 
 const STATE_META = {
   active: { c: T.teal, bg: T.teal, fg: T.black, t: "LIVE" },
@@ -99,42 +95,83 @@ function Badge({ state }) {
   return <span style={{ fontFamily: F.display, fontWeight: 800, fontSize: 14, letterSpacing: .5, color: s.fg, background: s.bg, padding: "3px 9px", textTransform: "uppercase" }}>{s.t}</span>;
 }
 
-function VaultCard({ vault, now, onClick, onDelete }) {
+// Server statuses that override the time badge. "armed" is the normal case and
+// falls through to the window badge, because then the clock is the whole story.
+const SERVER_PILL = {
+  funding: { bg: T.blue, fg: T.white, t: "FUNDING" },
+  claiming: { bg: T.blue, fg: T.white, t: "PAYING OUT" },
+  claimed: { bg: T.black, fg: T.white, t: "CLAIMED" },
+  refunding: { bg: T.blue, fg: T.white, t: "RETURNING" },
+  expired: { bg: T.black, fg: T.white, t: "RETURNED" },
+  cancelled: { bg: T.black, fg: T.white, t: "CANCELLED" },
+  unfunded: { bg: T.red, fg: T.white, t: "UNFUNDED" },
+  review: { bg: T.red, fg: T.white, t: "CHECKING" },
+};
+
+function VaultCard({ vault, now, onClick, onCancel }) {
+  const st = vault.status || "armed";
+  const pill = SERVER_PILL[st];
   const state = getTimeState(vault.timeStart, vault.timeEnd, now);
   const isActive = state === "active", isPending = state === "pending", isExpired = state === "expired";
   const msEnd = msUntil(vault.timeEnd, now), msStart = msUntil(vault.timeStart, now);
   const pct = windowPct(vault.timeStart, vault.timeEnd, now);
   const p = fmtCountdown(isActive ? msEnd : msStart);
   const fill = isActive ? T.teal : isPending ? T.blue : T.black;
+  const dead = !!pill && st !== "funding";
+  const openable = st === "armed" && !isExpired;
   return (
-    <div className="mp-band mp-band-w" style={{ opacity: isExpired ? .55 : 1, cursor: isExpired ? "default" : "pointer" }} onClick={() => !isExpired && onClick(vault)}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
-        <div>
+    <div className="mp-band mp-band-w" style={{ opacity: dead ? .55 : 1, cursor: openable ? "pointer" : "default" }} onClick={() => openable && onClick(vault)}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10, gap: 10 }}>
+        <div style={{ minWidth: 0 }}>
           <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 22, lineHeight: 1, textTransform: "uppercase" }}>{vault.label}</div>
           <div style={{ fontFamily: F.mono, fontSize: 10, marginTop: 4, letterSpacing: .5 }}>{vault.city}</div>
         </div>
-        <Badge state={state} />
+        {pill
+          ? <span style={{ fontFamily: F.display, fontWeight: 800, fontSize: 14, letterSpacing: .5, color: pill.fg, background: pill.bg, padding: "3px 9px", textTransform: "uppercase", whiteSpace: "nowrap" }}>{pill.t}</span>
+          : <Badge state={state} />}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
         <span style={{ fontFamily: F.display, fontWeight: 800, fontSize: 22, color: T.teal, letterSpacing: -.5 }}>{vault.zec} ZEC</span>
         <span style={{ fontFamily: F.mono, fontSize: 10 }}>· {vault.radius}m</span>
-        {vault.message && <span className="mp-tag blue" style={{ fontSize: 11, padding: "2px 6px" }}>MSG</span>}
-        {vault.wallet && <span className="mp-tag" style={{ fontSize: 11, padding: "2px 6px" }}>GATED</span>}
+        {vault.distance_m != null && <span style={{ fontFamily: F.mono, fontSize: 10, color: T.blue }}>· {vault.distance_m >= 1000 ? (vault.distance_m / 1000).toFixed(1) + "km" : vault.distance_m + "m"} away</span>}
+        {vault.has_message && <span className="mp-tag blue" style={{ fontSize: 11, padding: "2px 6px" }}>MSG</span>}
+        {vault.gated && <span className="mp-tag" style={{ fontSize: 11, padding: "2px 6px" }}>GATED</span>}
+        {!vault.mine && <span className="mp-tag teal" style={{ fontSize: 11, padding: "2px 6px" }}>FOR YOU</span>}
       </div>
       <div style={{ height: 8, border: `2px solid ${T.black}`, background: T.blueTint, overflow: "hidden", marginBottom: 8 }}>
         <div style={{ height: "100%", width: `${pct}%`, background: fill }} />
       </div>
       <div style={{ fontFamily: F.mono, fontSize: 11, letterSpacing: .5, color: fill }}>
-        {isActive && `CLOSES IN ${p.d !== "00" ? p.d + "D " : ""}${p.h}H ${p.m}M`}
-        {isPending && `OPENS IN ${p.d !== "00" ? p.d + "D " : ""}${p.h}H ${p.m}M`}
-        {isExpired && "WINDOW EXPIRED"}
+        {st === "funding" && "WAITING FOR THE ESCROW PAYMENT TO LAND"}
+        {st === "claimed" && (vault.claimed_by_me ? "YOU OPENED THIS ONE" : "OPENED BY SOMEONE IN RANGE")}
+        {st === "expired" && "WINDOW CLOSED · ZEC RETURNED TO YOU"}
+        {st === "cancelled" && "PULLED BACK · ZEC RETURNED TO YOU"}
+        {st === "unfunded" && "THE ESCROW PAYMENT NEVER ARRIVED"}
+        {st === "review" && "A PAYMENT NEEDS CHECKING · WE ARE ON IT"}
+        {st === "armed" && isActive && `CLOSES IN ${p.d !== "00" ? p.d + "D " : ""}${p.h}H ${p.m}M`}
+        {st === "armed" && isPending && `OPENS IN ${p.d !== "00" ? p.d + "D " : ""}${p.h}H ${p.m}M`}
+        {st === "armed" && isExpired && "WINDOW EXPIRED · RETURNING YOUR ZEC"}
       </div>
-      {onDelete && <button onClick={e => { e.stopPropagation(); if (window.confirm("Delete this vault?")) onDelete(vault.id); }} style={{ marginTop: 12, width: "100%", padding: "9px 0", background: "transparent", border: `2px solid ${T.signout}`, color: T.signout, fontFamily: F.mono, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" }}>DELETE VAULT</button>}
+      {vault.claim_txid && <div style={{ fontFamily: F.mono, fontSize: 9, marginTop: 6, wordBreak: "break-all", opacity: .7 }}>TX {vault.claim_txid}</div>}
+      {onCancel && vault.mine && st === "armed" && (
+        <button onClick={e => { e.stopPropagation(); if (window.confirm("Pull this vault back and refund the ZEC to your wallet?")) onCancel(vault.id); }}
+          style={{ marginTop: 12, width: "100%", padding: "9px 0", background: "transparent", border: `2px solid ${T.signout}`, color: T.signout, fontFamily: F.mono, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" }}>CANCEL AND REFUND</button>
+      )}
     </div>
   );
 }
 
 function PseudoMap({ vaults, now, onSelect }) {
+  // Spread pins over the bounding box of what is actually shown. A fixed world
+  // projection put every local drop on the same pixel, which made the map a
+  // decoration instead of a picker.
+  const lats = vaults.map(v => v.lat), lngs = vaults.map(v => v.lng);
+  const span = (min, max) => (max - min) || 1;
+  const [latMin, latMax] = [Math.min(...lats), Math.max(...lats)];
+  const [lngMin, lngMax] = [Math.min(...lngs), Math.max(...lngs)];
+  const pos = (v) => vaults.length === 1
+    ? { x: 50, y: 50 }
+    : { x: 10 + 80 * ((v.lng - lngMin) / span(lngMin, lngMax)), y: 14 + 72 * ((latMax - v.lat) / span(latMin, latMax)) };
   return (
     <div style={{ width: "100%", height: 200, background: T.off, border: `2px solid ${T.black}`, position: "relative", overflow: "hidden" }}>
       <svg width="100%" height="100%" style={{ position: "absolute", inset: 0, opacity: .12 }}>
@@ -145,8 +182,9 @@ function PseudoMap({ vaults, now, onSelect }) {
       {vaults.map(v => {
         const state = getTimeState(v.timeStart, v.timeEnd, now);
         const s = STATE_META[state] || STATE_META.active;
+        const p = pos(v);
         return (
-          <div key={v.id} onClick={() => state !== "expired" && onSelect(v)} style={{ position: "absolute", left: `${v.mapX}%`, top: `${v.mapY}%`, transform: "translate(-50%,-50%)", cursor: state !== "expired" ? "pointer" : "default" }}>
+          <div key={v.id} onClick={() => state !== "expired" && onSelect(v)} style={{ position: "absolute", left: `${p.x}%`, top: `${p.y}%`, transform: "translate(-50%,-50%)", cursor: state !== "expired" ? "pointer" : "default" }}>
             <div style={{ width: 12, height: 12, background: state === "expired" ? "transparent" : s.bg, border: `2px solid ${T.black}` }} />
           </div>
         );
@@ -163,10 +201,26 @@ function PseudoMap({ vaults, now, onSelect }) {
   );
 }
 
+const RESERVE_ZEC = 0.0003;   // matches PAYOUT_RESERVE server side: covers the payout or refund fee
+
 function CreateVault({ onBack, onCreate }) {
   const [step, setStep] = useState(0);
   const [form, setForm] = useState({ label: "", lat: "", lng: "", radius: 50, zec: "", message: "", timeStart: "", timeEnd: "", walletMode: "any", wallet: "", locLoading: false });
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState("");
   const up = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const deploy = async () => {
+    // Catch the obvious before money is asked to move.
+    const lat = parseFloat(form.lat), lng = parseFloat(form.lng);
+    if (isNaN(lat) || isNaN(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return setErr("Set a real location first");
+    if (!form.zec || parseFloat(form.zec) <= 0) return setErr("Set the ZEC amount");
+    if (!form.timeStart || !form.timeEnd) return setErr("Set the open and close times");
+    if (new Date(form.timeEnd) <= new Date(form.timeStart)) return setErr("The window has to close after it opens");
+    if (form.walletMode === "specific" && !form.wallet.trim()) return setErr("Enter the target wallet address");
+    setSubmitting(true); setErr("");
+    try { await onCreate(form); }
+    catch (e) { setErr(e.message || "Could not create the vault"); setSubmitting(false); }
+  };
   const lbl = { fontFamily: F.mono, fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 6, display: "block" };
   const STEPS = ["Location", "Time", "Payload", "Access"];
   const durMs = form.timeStart && form.timeEnd ? parseT(form.timeEnd) - parseT(form.timeStart) : 0;
@@ -230,11 +284,13 @@ function CreateVault({ onBack, onCreate }) {
           <div>
             <label style={lbl}>ENCRYPTED MESSAGE · OPTIONAL</label>
             <textarea className="mp-input" style={{ resize: "none", height: 88, lineHeight: 1.5 }} placeholder="Revealed only at unlock via Zcash memo" value={form.message} onChange={e => up("message", e.target.value)} />
-            <div style={{ fontFamily: F.mono, fontSize: 9, marginTop: 4, color: form.message.length > 490 ? T.red : T.black }}>{512 - form.message.length} BYTES REMAINING</div>
+            <div style={{ fontFamily: F.mono, fontSize: 9, marginTop: 4, color: form.message.length > 380 ? T.red : T.black }}>{400 - form.message.length} CHARACTERS REMAINING</div>
           </div>
           <div style={{ border: `2px solid ${T.black}`, background: T.blueTint, padding: 12 }}>
-            <div style={{ fontFamily: F.mono, fontSize: 9, letterSpacing: 1, textTransform: "uppercase", color: T.blue, marginBottom: 4 }}>ESCROW + TIME LOCK</div>
-            <div style={{ fontFamily: F.body, fontSize: 12, lineHeight: 1.5 }}>ZEC held in escrow until claimed. Unclaimed by {fmtDate(form.timeEnd) || "close"} → returns automatically.</div>
+            <div style={{ fontFamily: F.mono, fontSize: 9, letterSpacing: 1, textTransform: "uppercase", color: T.blue, marginBottom: 4 }}>WHAT THIS COSTS</div>
+            <div style={{ fontFamily: F.body, fontSize: 12, lineHeight: 1.5 }}>
+              Your wallet pays {form.zec ? (parseFloat(form.zec) + RESERVE_ZEC).toFixed(4) : "the amount plus " + RESERVE_ZEC.toFixed(4)} ZEC now: the vault amount plus {RESERVE_ZEC.toFixed(4)} to cover the network fee on the payout. It sits in ZAIM escrow until someone opens it, and comes back to you automatically if nobody does by {fmtDate(form.timeEnd) || "the closing time"}.
+            </div>
           </div>
         </>}
         {step === 3 && <>
@@ -260,20 +316,43 @@ function CreateVault({ onBack, onCreate }) {
           </div>
         </>}
       </div>
+      {err && <div style={{ padding: "12px 16px", borderTop: `2px solid ${T.black}`, background: T.redTint, fontFamily: F.mono, fontSize: 11, lineHeight: 1.5, color: T.red, textTransform: "uppercase", letterSpacing: .5 }}>{err}</div>}
       <div style={{ display: "flex", borderTop: `2px solid ${T.black}` }}>
-        {step > 0 && <button className="mp-btn ghost" style={{ flex: 1, border: "none", borderRight: `2px solid ${T.black}` }} onClick={() => setStep(s => s - 1)}>BACK</button>}
-        <button className="mp-btn blue" style={{ flex: 2, border: "none" }} onClick={() => step < STEPS.length - 1 ? setStep(s => s + 1) : onCreate(form)}>{step < STEPS.length - 1 ? "CONTINUE" : "DEPLOY VAULT"}</button>
+        {step > 0 && <button className="mp-btn ghost" style={{ flex: 1, border: "none", borderRight: `2px solid ${T.black}` }} onClick={() => setStep(s => s - 1)} disabled={submitting}>BACK</button>}
+        <button className="mp-btn blue" style={{ flex: 2, border: "none" }} disabled={submitting}
+          onClick={() => step < STEPS.length - 1 ? setStep(s => s + 1) : deploy()}>
+          {step < STEPS.length - 1 ? "CONTINUE" : submitting ? "FUNDING ESCROW…" : "DEPLOY VAULT"}
+        </button>
       </div>
     </div>
   );
 }
 
-function UnlockScreen({ vault, now, onBack }) {
+function UnlockScreen({ vault, now, onBack, onChanged }) {
   const state = getTimeState(vault.timeStart, vault.timeEnd, now);
   const [phase, setPhase] = useState(state === "active" ? "scanning" : state);
   const [gpsError, setGpsError] = useState("");
   const [userDist, setUserDist] = useState(null);
+  const [fix, setFix] = useState(null);          // the coordinates we will submit
+  const [claiming, setClaiming] = useState(false);
+  const [claimError, setClaimError] = useState("");
+  const [payout, setPayout] = useState(null);    // { zec, txid, message } from the server
   const msEnd = msUntil(vault.timeEnd, now);
+  // The check below is a courtesy so the UI can say "walk 40m north". The claim
+  // endpoint runs the same math server side and that run is the one that counts.
+  const claim = async () => {
+    if (!fix) return;
+    setClaiming(true); setClaimError("");
+    try {
+      const r = await API.post(`/geovault/${vault.id}/claim`, { lat: fix.lat, lng: fix.lng, accuracy: fix.acc });
+      setPayout(r);
+      setPhase("unlocked");
+      onChanged && onChanged();
+    } catch (e) {
+      setClaimError(e.message);
+    }
+    setClaiming(false);
+  };
   useEffect(() => {
     if (phase !== "scanning" || state !== "active") return;
     if (!navigator.geolocation) { setGpsError("GPS not available on this device"); setPhase("error"); return; }
@@ -285,7 +364,8 @@ function UnlockScreen({ vault, now, onBack }) {
       const a = Math.sin(dLat / 2) ** 2 + Math.cos(latitude * Math.PI / 180) * Math.cos(vault.lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
       const dist = Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
       setUserDist(dist);
-      setPhase(dist <= (vault.radius + (accuracy || 20)) ? "near" : "far");
+      setFix({ lat: latitude, lng: longitude, acc: Math.round(accuracy || 0) });
+      setPhase(dist <= (vault.radius + Math.min(accuracy || 20, vault.radius)) ? "near" : "far");
     };
     const onError = (err) => {
       if (err.code === 1) setGpsError("Location permission denied. Enable in browser settings.");
@@ -298,10 +378,10 @@ function UnlockScreen({ vault, now, onBack }) {
   const statusBlock = () => {
     const M = {
       scanning: { c: T.blue, t: "SCANNING LOCATION", s: "verifying GPS coordinates…" },
-      near: { c: T.teal, t: "IN RANGE", s: userDist !== null ? `${userDist}m away · within ${vault.radius}m` : "within range" },
+      near: { c: T.teal, t: "IN RANGE", s: userDist !== null ? `${userDist}m away · within ${vault.radius}m${fix?.acc ? ` · ±${fix.acc}m fix` : ""}` : "within range" },
       far: { c: T.red, t: "OUT OF RANGE", s: userDist !== null ? `${userDist}m away · needs within ${vault.radius}m` : "too far from vault" },
       error: { c: T.red, t: "LOCATION ERROR", s: gpsError },
-      unlocked: { c: T.teal, t: "VAULT UNLOCKED", s: "ZEC transferred to your wallet" },
+      unlocked: { c: T.teal, t: "VAULT UNLOCKED", s: payout ? `${Number(payout.zec).toFixed(4)} ZEC sent to your wallet` : "paid out to your wallet" },
     }[phase] || { c: T.blue, t: "…", s: "" };
     return (
       <div style={{ border: `2px solid ${T.black}`, background: phase === "unlocked" || phase === "near" ? T.tealTint : phase === "far" || phase === "error" ? T.redTint : T.blueTint, padding: 20, textAlign: "center" }}>
@@ -329,17 +409,28 @@ function UnlockScreen({ vault, now, onBack }) {
             <div style={{ fontFamily: F.mono, fontSize: 9, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 8 }}>VAULT CONTENTS</div>
             <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 34, color: T.teal, letterSpacing: -1 }}>{vault.zec} ZEC</div>
           </div>
-          {vault.message && <div style={{ padding: 14, borderBottom: `2px solid ${T.black}` }}>
-            <div style={{ fontFamily: F.mono, fontSize: 9, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 8 }}>ENCRYPTED MESSAGE</div>
-            {phase === "unlocked" ? <div style={{ fontFamily: F.body, fontSize: 14, lineHeight: 1.5, background: T.off, border: `2px solid ${T.black}`, padding: 10 }}>{vault.message}</div> : <div style={{ fontFamily: F.mono, fontSize: 14, letterSpacing: 3, color: T.black, opacity: .3 }}>████ ████████ ████ ████</div>}
+          {vault.has_message && <div style={{ padding: 14, borderBottom: `2px solid ${T.black}` }}>
+            <div style={{ fontFamily: F.mono, fontSize: 9, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 8 }}>MESSAGE</div>
+            {payout?.message
+              ? <div style={{ fontFamily: F.body, fontSize: 14, lineHeight: 1.5, background: T.off, border: `2px solid ${T.black}`, padding: 10 }}>{payout.message}</div>
+              : <>
+                <div style={{ fontFamily: F.mono, fontSize: 14, letterSpacing: 3, color: T.black, opacity: .3 }}>████ ████████ ████ ████</div>
+                <div style={{ fontFamily: F.mono, fontSize: 9, marginTop: 6, opacity: .7 }}>DELIVERED IN THE PAYOUT MEMO WHEN YOU OPEN IT</div>
+              </>}
+          </div>}
+          {payout?.txid && <div style={{ padding: 14, borderBottom: `2px solid ${T.black}` }}>
+            <div style={{ fontFamily: F.mono, fontSize: 9, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 8 }}>PAYOUT TRANSACTION</div>
+            <div style={{ fontFamily: F.mono, fontSize: 11, wordBreak: "break-all" }}>{payout.txid}</div>
           </div>}
           <div style={{ padding: 14 }}>
-            {[["Location", vault.city], ["Radius", `${vault.radius}m`], ["Access", vault.wallet ? `Gated: ${vault.wallet.slice(0, 12)}…` : "Open to all"]].map(([k, v]) => (
+            {[["Location", vault.city], ["Radius", `${vault.radius}m`], ["Access", vault.gated ? "Addressed to one wallet" : "Open to anyone in range"]].map(([k, v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", fontFamily: F.mono, fontSize: 11 }}><span>{k.toUpperCase()}</span><span>{v}</span></div>
             ))}
           </div>
         </div>
-        {phase === "near" && <button className="mp-btn" onClick={() => setPhase("unlocked")}>UNLOCK VAULT</button>}
+        {claimError && <div style={{ border: `2px solid ${T.black}`, background: T.redTint, padding: 12, fontFamily: F.mono, fontSize: 11, lineHeight: 1.5, color: T.red, textTransform: "uppercase", letterSpacing: .5 }}>{claimError}</div>}
+        {phase === "near" && !vault.mine && <button className="mp-btn" onClick={claim} disabled={claiming}>{claiming ? "OPENING… PAYING OUT ON CHAIN" : "UNLOCK VAULT"}</button>}
+        {phase === "near" && vault.mine && <div style={{ border: `2px solid ${T.black}`, background: T.blueTint, padding: 14, fontFamily: F.mono, fontSize: 11, lineHeight: 1.5, textTransform: "uppercase" }}>This is your own vault. Cancel it from the list to get the ZEC back.</div>}
         {phase === "unlocked" && <button className="mp-btn" onClick={onBack}>DONE</button>}
         {phase === "error" && <button className="mp-btn" onClick={() => { setPhase("scanning"); setGpsError(""); }}>TRY AGAIN</button>}
         {(phase === "far" || phase === "error" || state !== "active") && <button className="mp-btn ghost" onClick={onBack}>← BACK</button>}
@@ -348,57 +439,117 @@ function UnlockScreen({ vault, now, onBack }) {
   );
 }
 
+// Server shape -> the shape the cards and the map already speak. Times arrive as
+// unix seconds so no timezone can get lost in a string on the way here.
+function shapeVault(v) {
+  const lat = Number(v.lat), lng = Number(v.lng);
+  return {
+    ...v,
+    timeStart: new Date(v.opens_at * 1000).toISOString(),
+    timeEnd: new Date(v.closes_at * 1000).toISOString(),
+    zec: Number(v.zec).toFixed(4),
+    lat, lng,
+    city: `${lat.toFixed(4)}, ${lng.toFixed(4)}`,
+    mapX: Math.min(94, Math.max(6, ((lng + 180) / 360) * 100)),
+    mapY: Math.min(88, Math.max(12, ((90 - lat) / 180) * 100)),
+  };
+}
+
 export default function ZAIMGeoVault() {
   const [screen, setScreen] = useState("list");
   const [selected, setSelected] = useState(null);
   const [now, setNow] = useState(new Date());
   const [vaults, setVaults] = useState([]);
+  const [nearby, setNearby] = useState(null);
   const [loading, setLoading] = useState(true);
-  const store = {
-    list: () => { try { return JSON.parse(localStorage.getItem("zaim_geovaults") || "[]"); } catch (e) { return []; } },
-    save: (v) => localStorage.setItem("zaim_geovaults", JSON.stringify(v)),
-  };
+  const [error, setError] = useState("");
+  const [scanning, setScanning] = useState(false);
+  const [busy, setBusy] = useState("");
   const loadVaults = async () => {
     try {
-      const r = { vaults: store.list() };
-      setVaults((r.vaults || []).map(v => ({
-        ...v, timeStart: v.time_start, timeEnd: v.time_end,
-        mapX: Math.abs(parseFloat(v.lng || 0)) % 100, mapY: Math.abs(parseFloat(v.lat || 0)) % 80,
-        city: v.city || `${parseFloat(v.lat || 0).toFixed(2)}, ${parseFloat(v.lng || 0).toFixed(2)}`,
-      })));
-    } catch (e) { } setLoading(false);
+      const r = await API.get("/geovault/mine");
+      setVaults((r.vaults || []).map(shapeVault));
+      setError("");
+    } catch (e) { setError(e.message); }
+    setLoading(false);
   };
-  useEffect(() => { loadVaults(); }, []);
+  // Vaults change state on the server (funding lands, windows expire, someone
+  // else claims), so poll rather than trusting whatever we fetched on mount.
+  // A hidden tab skips its ticks; nothing there to update anyway.
+  useEffect(() => {
+    loadVaults();
+    const t = setInterval(() => { if (!document.hidden) loadVaults(); }, 20000);
+    return () => clearInterval(t);
+  }, []);
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
-  const activeCount = vaults.filter(v => getTimeState(v.timeStart, v.timeEnd, now) === "active").length;
-  const pendCount = vaults.filter(v => getTimeState(v.timeStart, v.timeEnd, now) === "pending").length;
-  const totalZec = vaults.reduce((a, v) => a + (parseFloat(v.zec) || 0), 0).toFixed(1);
+  const scanNearby = () => {
+    if (!navigator.geolocation) { setError("GPS is not available on this device"); return; }
+    setScanning(true); setError("");
+    navigator.geolocation.getCurrentPosition(async pos => {
+      try {
+        const r = await API.get(`/geovault/nearby?lat=${pos.coords.latitude}&lng=${pos.coords.longitude}&km=50`);
+        setNearby((r.vaults || []).map(shapeVault));
+      } catch (e) { setError(e.message); }
+      setScanning(false);
+    }, err => { setError("Location error: " + err.message); setScanning(false); },
+      { enableHighAccuracy: true, timeout: 15000 });
+  };
+  const cancelVault = async (id) => {
+    setBusy(id); setError("");
+    try { await API.post(`/geovault/${id}/cancel`, {}); await loadVaults(); }
+    catch (e) { setError(e.message); }
+    setBusy("");
+  };
+  const mine = vaults.filter(v => v.mine);
+  const armed = vaults.filter(v => v.status === "armed");
+  const activeCount = armed.filter(v => getTimeState(v.timeStart, v.timeEnd, now) === "active").length;
+  const pendCount = armed.filter(v => getTimeState(v.timeStart, v.timeEnd, now) === "pending").length;
+  const totalZec = mine.filter(v => ["armed", "funding", "claiming", "review"].includes(v.status))
+    .reduce((a, v) => a + (parseFloat(v.zec) || 0), 0).toFixed(4);
+  // Only live vaults belong on the map. Claimed and returned ones are history.
+  const mapVaults = [...vaults, ...(nearby || []).filter(n => !vaults.some(v => v.id === n.id))]
+    .filter(v => v.status === "armed");
   if (screen === "create") return <CreateVault onBack={() => setScreen("list")} onCreate={async (form) => {
-    try {
-      const all = store.list();
-      all.push({ id: String(Date.now()), label: form.label || "Unnamed Vault", lat: parseFloat(form.lat) || 0, lng: parseFloat(form.lng) || 0, radius: form.radius, zec: parseFloat(form.zec) || 0, message: form.message, time_start: form.timeStart, time_end: form.timeEnd, wallet_mode: form.walletMode, wallet: form.wallet, created: new Date().toISOString(), status: "active" });
-      store.save(all);
-      await loadVaults();
-    } catch (e) { alert("Failed to save vault: " + e.message); }
+    await API.post("/geovault/create", {
+      label: form.label,
+      lat: parseFloat(form.lat), lng: parseFloat(form.lng),
+      radius: form.radius,
+      zec: parseFloat(form.zec) || 0,
+      message: form.message,
+      opens_at: new Date(form.timeStart).getTime() / 1000,
+      closes_at: new Date(form.timeEnd).getTime() / 1000,
+      target_address: form.walletMode === "specific" ? (form.wallet || "").trim() : "",
+    });
+    await loadVaults();
     setScreen("list");
   }} />;
-  if (screen === "unlock" && selected) return <UnlockScreen vault={selected} now={now} onBack={() => { setScreen("list"); setSelected(null); }} />;
+  if (screen === "unlock" && selected) return <UnlockScreen vault={selected} now={now} onChanged={loadVaults} onBack={() => { setScreen("list"); setSelected(null); loadVaults(); }} />;
   return (
     <div className="mp-scroll">
       <div className="mp-head" style={{ position: "static" }}>
         <div className="mp-title">GeoVault</div>
         <div className="mp-meta" style={{ color: T.blue }}>ZEC DROPS</div>
       </div>
-      <div className="mp-band"><PseudoMap vaults={vaults} now={now} onSelect={v => { setSelected(v); setScreen("unlock"); }} /></div>
+      <div className="mp-band"><PseudoMap vaults={mapVaults} now={now} onSelect={v => { setSelected(v); setScreen("unlock"); }} /></div>
       <div className="mp-grid">
         <div className="mp-cell"><div className="mp-cell-key">LIVE NOW</div><div className="mp-cell-val" style={{ color: T.teal }}>{activeCount}</div></div>
         <div className="mp-cell"><div className="mp-cell-key">SCHEDULED</div><div className="mp-cell-val" style={{ color: T.blue }}>{pendCount}</div></div>
       </div>
-      <div className="mp-kv"><span className="mp-kv-key">TOTAL ESCROWED</span><span className="mp-kv-val" style={{ color: T.teal }}>{totalZec} ZEC</span></div>
+      <div className="mp-kv"><span className="mp-kv-key">YOUR ZEC IN ESCROW</span><span className="mp-kv-val" style={{ color: T.teal }}>{totalZec} ZEC</span></div>
+      {error && <div className="mp-band" style={{ background: T.redTint }}><span style={{ fontFamily: F.mono, fontSize: 11, color: T.red, textTransform: "uppercase", letterSpacing: .5 }}>{error}</span></div>}
       <div className="mp-section">YOUR VAULTS</div>
       {loading ? <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">Loading vaults…</span></div>
         : vaults.length === 0 ? <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">No vaults yet. Drop one below.</span></div>
-          : vaults.map(v => <VaultCard key={v.id} vault={v} now={now} onClick={vault => { setSelected(vault); setScreen("unlock"); }} onDelete={async (id) => { store.save(store.list().filter(v => v.id !== id)); await loadVaults(); }} />)}
+          : vaults.map(v => <VaultCard key={v.id} vault={v} now={now} onClick={vault => { setSelected(vault); setScreen("unlock"); }} onCancel={busy === v.id ? null : cancelVault} />)}
+      <div className="mp-section" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span>OPEN DROPS NEAR YOU</span>
+        <button onClick={scanNearby} disabled={scanning} style={{ fontFamily: F.mono, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", background: T.white, color: T.blue, border: "none", padding: "3px 8px", cursor: "pointer" }}>{scanning ? "SCANNING…" : "SCAN"}</button>
+      </div>
+      {nearby === null
+        ? <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">Scan to find open vaults within 50km.</span></div>
+        : nearby.length === 0
+          ? <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">Nothing dropped near you right now.</span></div>
+          : nearby.map(v => <VaultCard key={v.id} vault={v} now={now} onClick={vault => { setSelected(vault); setScreen("unlock"); }} />)}
       <div style={{ padding: 16 }}><button className="mp-btn blue" onClick={() => setScreen("create")}>+ CREATE GEOVAULT</button></div>
     </div>
   );

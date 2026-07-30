@@ -1,0 +1,211 @@
+// Features preview shown from the sign in screen, under the dev log.
+// Every visual below is built from the same tokens and classes the real screens
+// use, so a redesign of the app carries through here instead of going stale.
+// Nothing here is interactive. It is a look, not a demo.
+import { T, F } from "./styles/maxpain.js";
+
+const BackArrow = ({ onClick }) => (
+  <button onClick={onClick} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", display: "flex" }} aria-label="Back">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l7-7M5 12l7 7" stroke={T.black} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+  </button>
+);
+
+// One feature: numbered blue rule, the highlight visual, one sentence.
+function Feature({ n, name, tag, tagColor, desc, children }) {
+  return (
+    <>
+      <div className="mp-section" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+        <span>{n} · {name}</span>
+        {tag && <span style={{ background: tagColor || T.white, color: tagColor ? T.white : T.blue, padding: "2px 7px", letterSpacing: 1 }}>{tag}</span>}
+      </div>
+      <div style={{ padding: 16, background: T.white, borderBottom: `2px solid ${T.black}` }}>
+        <div aria-hidden="true" style={{ border: `2px solid ${T.black}`, background: T.off, overflow: "hidden", pointerEvents: "none", userSelect: "none" }}>
+          {children}
+        </div>
+        <div style={{ fontFamily: F.body, fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{desc}</div>
+      </div>
+    </>
+  );
+}
+
+// ── the highlight visuals ────────────────────────────────────────────────────
+const Lbl = ({ children, color, style }) => (
+  <div style={{ fontFamily: F.mono, fontSize: 9, letterSpacing: 1.5, textTransform: "uppercase", color: color || T.black, ...style }}>{children}</div>
+);
+const Cell = ({ k, v, color, last }) => (
+  <div style={{ padding: "9px 11px", borderRight: last ? "none" : `2px solid ${T.black}`, background: T.white }}>
+    <Lbl>{k}</Lbl>
+    <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 18, lineHeight: 1, marginTop: 5, color: color || T.black }}>{v}</div>
+  </div>
+);
+const FakeField = ({ k, v, mono = true, dim }) => (
+  <div style={{ marginBottom: 9 }}>
+    <Lbl style={{ marginBottom: 4 }}>{k}</Lbl>
+    <div style={{ border: `2px solid ${T.black}`, background: T.white, padding: "8px 10px", fontFamily: mono ? F.mono : F.body, fontSize: 11, color: dim ? "rgba(0,0,0,.4)" : T.black, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{v}</div>
+  </div>
+);
+
+const WalletVisual = () => (
+  <div>
+    <div style={{ padding: "13px 12px", borderBottom: `2px solid ${T.black}` }}>
+      <Lbl style={{ marginBottom: 7 }}>Shielded balance · all</Lbl>
+      <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 46, lineHeight: .95, letterSpacing: -1.5 }}>2.4718</div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+        <Lbl>ZEC total</Lbl>
+        <span style={{ fontFamily: F.mono, fontSize: 10 }}>≈ $1,247.03 USD</span>
+      </div>
+    </div>
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", borderBottom: `2px solid ${T.black}` }}>
+      <Cell k="Shielded" v="2.4718" color={T.teal} />
+      <Cell k="Transparent" v="0.0000" color={T.blue} last />
+    </div>
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "11px 12px", background: T.white }}>
+      <div>
+        <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 26, letterSpacing: -.5 }}>$504.31</div>
+        <Lbl style={{ marginTop: 4 }}>Zcash · coingecko</Lbl>
+      </div>
+      <div style={{ textAlign: "right" }}>
+        <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 20, color: T.teal, letterSpacing: -.5 }}>+4.62%</div>
+        <Lbl style={{ marginTop: 3 }}>24h</Lbl>
+      </div>
+    </div>
+  </div>
+);
+
+const SendVisual = () => (
+  <div>
+    <div style={{ padding: 12, borderBottom: `2px solid ${T.black}` }}>
+      <FakeField k="To address" v="zs1w8q4m0hy7v2xk9d3rp6as5ftu1…" />
+      <FakeField k="Amount · ZEC" v="0.2500" />
+      <FakeField k="Memo · optional" v="Dinner, split four ways" mono={false} />
+    </div>
+    <div style={{ display: "flex" }}>
+      <div style={{ flex: 1, padding: "11px 0", textAlign: "center", background: T.black, color: T.off, fontFamily: F.body, fontWeight: 600, fontSize: 12 }}>SEND</div>
+    </div>
+  </div>
+);
+
+const MessagesVisual = () => (
+  <div style={{ padding: 12, background: T.off }}>
+    <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 9 }}>
+      <div style={{ maxWidth: "84%", padding: "8px 10px", border: `2px solid ${T.black}`, background: T.white }}>
+        <div style={{ fontFamily: F.body, fontSize: 12, lineHeight: 1.4 }}>Landed. Same place as last time?</div>
+        <Lbl style={{ marginTop: 4, opacity: .8 }}>Block 2,845,113 · 0.0001 ZEC</Lbl>
+      </div>
+    </div>
+    <div style={{ display: "flex", justifyContent: "flex-end" }}>
+      <div style={{ maxWidth: "84%", padding: "8px 10px", border: `2px solid ${T.black}`, background: T.blue, color: T.white }}>
+        <div style={{ fontFamily: F.body, fontSize: 12, lineHeight: 1.4 }}>Yes. Ten minutes.</div>
+        <Lbl color={T.white} style={{ marginTop: 4, opacity: .8 }}>Pending · 0.0001 ZEC</Lbl>
+      </div>
+    </div>
+  </div>
+);
+
+const SwapVisual = () => (
+  <div>
+    <div style={{ display: "flex", borderBottom: `2px solid ${T.black}` }}>
+      {["BTC", "ETH", "SOL", "USDC"].map((a, i) => (
+        <div key={a} style={{ flex: 1, padding: "9px 0", textAlign: "center", fontFamily: F.display, fontWeight: 800, fontSize: 13, borderRight: i < 3 ? `2px solid ${T.black}` : "none", background: a === "SOL" ? T.blue : T.off, color: a === "SOL" ? T.white : T.black }}>{a}</div>
+      ))}
+    </div>
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", borderBottom: `2px solid ${T.black}` }}>
+      <Cell k="You send" v="4.0000" />
+      <Cell k="You get ≈" v="1.6214" color={T.teal} last />
+    </div>
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", background: T.white }}>
+      <Cell k="Est time" v="~46s" />
+      <Cell k="Slippage" v="1%" last />
+    </div>
+  </div>
+);
+
+const GeoVisual = () => (
+  <div style={{ padding: 12, background: T.white }}>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 9 }}>
+      <div>
+        <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 19, lineHeight: 1, textTransform: "uppercase" }}>Tokyo Drop</div>
+        <Lbl style={{ marginTop: 4 }}>Shibuya · 35.6620, 139.7038</Lbl>
+      </div>
+      <span style={{ fontFamily: F.display, fontWeight: 800, fontSize: 12, lineHeight: 1, padding: "4px 8px", background: T.teal, color: T.black, textTransform: "uppercase" }}>In range</span>
+    </div>
+    <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 10, flexWrap: "wrap" }}>
+      <span style={{ fontFamily: F.display, fontWeight: 800, fontSize: 19, color: T.teal, letterSpacing: -.5 }}>0.5000 ZEC</span>
+      <span style={{ fontFamily: F.mono, fontSize: 9 }}>· 50m</span>
+      <span style={{ fontFamily: F.display, fontWeight: 800, fontSize: 10, lineHeight: 1, padding: "2px 6px", background: T.blue, color: T.white, textTransform: "uppercase" }}>MSG</span>
+    </div>
+    <div style={{ height: 8, border: `2px solid ${T.black}`, background: T.blueTint, overflow: "hidden", marginBottom: 7 }}>
+      <div style={{ height: "100%", width: "62%", background: T.teal }} />
+    </div>
+    <Lbl color={T.teal}>Closes in 02h 14m</Lbl>
+  </div>
+);
+
+const SeedVisual = () => (
+  <div>
+    {[["Identity", "your seed · no account", T.blue], ["Key storage", "server side · custodial", T.black], ["At rest", "sealed · seed encrypted", T.teal]].map(([k, v, c], i) => (
+      <div key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "10px 12px", borderBottom: i < 2 ? `2px solid ${T.black}` : "none", background: T.white }}>
+        <Lbl>{k}</Lbl>
+        <span style={{ fontFamily: F.mono, fontSize: 11, color: c, textAlign: "right" }}>{v}</span>
+      </div>
+    ))}
+  </div>
+);
+
+// ── screen ───────────────────────────────────────────────────────────────────
+export default function FeaturesScreen({ onBack }) {
+  return (
+    <div className="mp-scroll">
+      <div className="mp-head">
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <BackArrow onClick={onBack} />
+          <div className="mp-title">Features</div>
+        </div>
+        <div className="mp-meta" style={{ color: T.blue }}>ZAIM</div>
+      </div>
+
+      <div className="mp-band">
+        <div className="mp-quip">Everything ZAIM does, one screen at a time. Sample numbers, real screens.</div>
+      </div>
+
+      <Feature n="01" name="Shielded wallet"
+        desc="A single screen for your shielded and transparent balances, the live ZEC price, and every transaction the wallet has seen.">
+        <WalletVisual />
+      </Feature>
+
+      <Feature n="02" name="Send ZEC"
+        desc="Pay any shielded or unified address, with an optional memo that travels encrypted inside the transaction itself.">
+        <SendVisual />
+      </Feature>
+
+      <Feature n="03" name="Messages"
+        desc="Each message is a real shielded transaction carrying an encrypted memo, so the chain proves it happened while the words stay between you and the recipient.">
+        <MessagesVisual />
+      </Feature>
+
+      <Feature n="04" name="Cross chain swaps"
+        desc="Trade BTC, ETH, SOL or USDC for ZEC and back through NEAR Intents, with no account and no order book, and cancel any swap you have not funded.">
+        <SwapVisual />
+      </Feature>
+
+      <Feature n="05" name="GeoVault" tag="IN TESTING" tagColor={T.red}
+        desc="Park ZEC and a message at a set of coordinates in ZAIM escrow, where only someone inside the radius during your window can release it, and anything nobody claims comes back to you when the window closes.">
+        <GeoVisual />
+      </Feature>
+
+      <Feature n="06" name="Seed only sign in"
+        desc="There is no username and no password, because your seed phrase is the login, and signing out seals the wallet with a key derived from that same seed.">
+        <SeedVisual />
+      </Feature>
+
+      <div className="mp-section">THE HONEST PART</div>
+      <div className="mp-band mp-band-w">
+        <div className="mp-quip">Your wallet lives on our server while you are signed in, and it is sealed the moment you sign out. Your seed is a standard Zcash seed, so it opens the same wallet in Zashi or Ywallet whenever you want to leave.</div>
+      </div>
+
+      <div style={{ padding: 16 }}>
+        <button className="mp-btn" onClick={onBack}>BACK TO SIGN IN</button>
+      </div>
+    </div>
+  );
+}

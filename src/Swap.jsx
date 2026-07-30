@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { T, F } from "./styles/maxpain.js";
+import { apiGet, apiPost } from "./api.js";
 
 // ZAIM ⇄ the world — cross-chain swaps via NEAR Intents (1Click API).
 // BUY:  pick an asset, get a quote, send the asset to a one-time deposit
@@ -9,26 +10,7 @@ import { T, F } from "./styles/maxpain.js";
 //       your ZEC to the swap's deposit address; the asset arrives at your
 //       destination. All quotes and state live server-side.
 
-const api = {
-  headers: () => ({
-    "Content-Type": "application/json",
-    ...(localStorage.getItem("zaim_token")
-      ? { Authorization: `Bearer ${localStorage.getItem("zaim_token")}` }
-      : {}),
-  }),
-  async post(p, b) {
-    const r = await fetch(`/api${p}`, { method: "POST", headers: this.headers(), body: JSON.stringify(b) });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || "Failed");
-    return d;
-  },
-  async get(p) {
-    const r = await fetch(`/api${p}`, { headers: this.headers() });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || "Failed");
-    return d;
-  },
-};
+const api = { get: apiGet, post: apiPost };
 
 const ASSETS = [
   { key: "BTC", label: "BTC", chain: "bitcoin" },

@@ -1,9 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
 import { T, F } from "./styles/maxpain.js";
 
+// Ops panel, reachable by five taps on the version line in Settings. Strictly
+// read plus two levers: seal every wallet, and read the escrow seed for backup.
+// There are no accounts to administer; the seed is the account.
+
 const API = "/api";
 const ADMIN_TOKEN_KEY = "zaim_admin_token";
-const TABS = ["Stats", "Users", "GeoVaults", "Sessions"];
+const TABS = ["Stats", "Vaults", "Sessions", "Escrow"];
 
 export default function AdminDashboard({ onExit }) {
   const [token, setToken] = useState(() => localStorage.getItem(ADMIN_TOKEN_KEY) || "");
@@ -12,17 +16,19 @@ export default function AdminDashboard({ onExit }) {
   const [authError, setAuthError] = useState("");
   const [tab, setTab] = useState("Stats");
   const [stats, setStats] = useState(null);
-  const [users, setUsers] = useState([]);
   const [vaults, setVaults] = useState([]);
   const [sessions, setSessions] = useState([]);
+  const [escrow, setEscrow] = useState(null);
+  const [seed, setSeed] = useState("");
   const [msg, setMsg] = useState("");
 
   const headers = { "X-Admin-Token": token };
+  const say = (m) => { setMsg(m); setTimeout(() => setMsg(""), 3000); };
 
   const fetchStats = useCallback(async () => { const r = await fetch(`${API}/admin/stats`, { headers }); if (r.ok) setStats(await r.json()); }, [token]);
-  const fetchUsers = useCallback(async () => { const r = await fetch(`${API}/admin/users`, { headers }); if (r.ok) { const d = await r.json(); setUsers(d.users); } }, [token]);
-  const fetchVaults = useCallback(async () => { const r = await fetch(`${API}/admin/geovaults`, { headers }); if (r.ok) { const d = await r.json(); setVaults(d.geovaults); } }, [token]);
-  const fetchSessions = useCallback(async () => { const r = await fetch(`${API}/admin/sessions`, { headers }); if (r.ok) { const d = await r.json(); setSessions(d.sessions); } }, [token]);
+  const fetchVaults = useCallback(async () => { const r = await fetch(`${API}/admin/geovaults`, { headers }); if (r.ok) setVaults((await r.json()).geovaults || []); }, [token]);
+  const fetchSessions = useCallback(async () => { const r = await fetch(`${API}/admin/sessions`, { headers }); if (r.ok) setSessions((await r.json()).sessions || []); }, [token]);
+  const fetchEscrow = useCallback(async () => { const r = await fetch(`${API}/admin/escrow`, { headers }); if (r.ok) setEscrow(await r.json()); }, [token]);
 
   const tryAuth = async () => {
     setAuthError("");
@@ -35,24 +41,25 @@ export default function AdminDashboard({ onExit }) {
   useEffect(() => {
     if (!authed) return;
     fetchStats();
-    if (tab === "Users") fetchUsers();
-    if (tab === "GeoVaults") fetchVaults();
+    if (tab === "Vaults") fetchVaults();
     if (tab === "Sessions") fetchSessions();
+    if (tab === "Escrow") fetchEscrow();
   }, [authed, tab]);
 
-  const deleteUser = async (username) => {
-    if (!window.confirm(`Delete user "${username}"? This cannot be undone.`)) return;
-    const r = await fetch(`${API}/admin/users/${username}`, { method: "DELETE", headers });
-    if (r.ok) { setMsg(`Deleted ${username}`); fetchUsers(); fetchStats(); }
+  const sealAll = async () => {
+    if (!window.confirm("Seal every open wallet and drop all sessions? Every user signs in again with their seed.")) return;
+    const r = await fetch(`${API}/admin/seal_all`, { method: "POST", headers });
+    if (r.ok) { const d = await r.json(); say(`Sealed ${d.sealed.length}, plaintext left ${d.left_plaintext.length}`); fetchStats(); }
+    else say("Seal failed");
   };
-  const deleteVault = async (id) => {
-    if (!window.confirm("Delete this GeoVault?")) return;
-    const r = await fetch(`${API}/admin/geovaults/${id}`, { method: "DELETE", headers });
-    if (r.ok) { setMsg("Vault deleted."); fetchVaults(); fetchStats(); }
+  const revealSeed = async () => {
+    if (seed) { setSeed(""); return; }
+    if (!window.confirm("Show the escrow seed on screen? Anyone who reads it controls every vaulted coin.")) return;
+    const r = await fetch(`${API}/admin/escrow?reveal_seed=true`, { headers });
+    if (r.ok) { const d = await r.json(); setSeed(d.seed || d.seed_error || "unavailable"); }
   };
   const logout = () => { localStorage.removeItem(ADMIN_TOKEN_KEY); setToken(""); setAuthed(false); setInput(""); };
 
-  // ── Login ──
   if (!authed) return (
     <div className="mp-scroll">
       <div className="mp-band-blue" style={{ padding: "36px 16px", borderBottom: `2px solid ${T.black}` }}>
@@ -72,11 +79,8 @@ export default function AdminDashboard({ onExit }) {
   const StatCell = ({ label, value }) => (
     <div className="mp-cell"><div className="mp-cell-key">{label}</div><div className="mp-cell-val" style={{ fontSize: 40 }}>{value ?? "···"}</div></div>
   );
-  const DelBtn = ({ onClick }) => (
-    <button onClick={onClick} style={{ fontFamily: F.mono, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: T.white, background: T.signout, border: `2px solid ${T.black}`, padding: "6px 12px", cursor: "pointer", whiteSpace: "nowrap" }}>DELETE</button>
-  );
+  const fmtT = (ts) => ts ? new Date(ts * 1000).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "···";
 
-  // ── Dashboard ──
   return (
     <div className="mp-scroll">
       <div className="mp-head" style={{ position: "static" }}>
@@ -93,48 +97,39 @@ export default function AdminDashboard({ onExit }) {
         ))}
       </div>
 
-      {tab === "Stats" && stats && (
+      {tab === "Stats" && stats && (<>
         <div className="mp-grid">
           <StatCell label="Open Wallets" value={Array.isArray(stats.wallets_active) ? stats.wallets_active.length : stats.wallets_active} />
           <StatCell label="Sealed" value={stats.wallets_sealed} />
           <StatCell label="Sessions" value={stats.active_sessions} />
           <StatCell label="Swaps Open" value={stats.swaps_open} />
-          <StatCell label="Swaps Total" value={stats.swaps_total} />
         </div>
-      )}
-
-      {tab === "Users" && (<>
-        <div className="mp-section">{users.length} USERS</div>
-        {users.map(u => (
-          <div key={u.username} className="mp-band" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                <span style={{ fontFamily: F.display, fontWeight: 800, fontSize: 20, textTransform: "uppercase" }}>{u.username}</span>
-                {u.is_admin && <span className="mp-tag teal">ADMIN</span>}
-              </div>
-              <div style={{ fontFamily: F.mono, fontSize: 10, marginTop: 6 }}>{u.geovault_count} VAULTS · {u.contact_count} CONTACTS</div>
-              <div className="mp-mono" style={{ fontSize: 10, marginTop: 6 }}>z: {u.z_address || "···"}</div>
-              <div className="mp-mono" style={{ fontSize: 10, marginTop: 3 }}>t: {u.t_address || "···"}</div>
-            </div>
-            <DelBtn onClick={() => deleteUser(u.username)} />
-          </div>
-        ))}
+        <div style={{ padding: 16 }}>
+          <button className="mp-btn danger" onClick={sealAll}>SEAL ALL WALLETS NOW</button>
+        </div>
+        <div style={{ padding: "0 16px 16px", textAlign: "center" }}>
+          <span className="mp-lbl-sm">EVERY OPEN WALLET IS ENCRYPTED AND EVERY SESSION DROPPED. FOR MAINTENANCE WINDOWS.</span>
+        </div>
       </>)}
 
-      {tab === "GeoVaults" && (<>
-        <div className="mp-section">{vaults.length} GEOVAULTS</div>
+      {tab === "Vaults" && (<>
+        <div className="mp-section">{vaults.length} GEOVAULTS · ALL TIME</div>
+        {vaults.length === 0 && <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">No vaults yet.</span></div>}
         {vaults.map(v => (
-          <div key={v.id} className="mp-band" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                <span style={{ fontFamily: F.display, fontWeight: 800, fontSize: 20, textTransform: "uppercase" }}>{v.label}</span>
-                <span className="mp-tag teal">{v.zec} ZEC</span>
-                <span className="mp-tag blue">{v.status}</span>
-              </div>
-              <div style={{ fontFamily: F.mono, fontSize: 10, marginTop: 6 }}>OWNER: {v.owner} · {v.lat}, {v.lng} · {v.radius}m</div>
-              {v.message && <div style={{ fontFamily: F.mono, fontSize: 10, marginTop: 4, color: T.blue }}>MSG: {v.message}</div>}
+          <div key={v.id} className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontFamily: F.display, fontWeight: 800, fontSize: 20, textTransform: "uppercase" }}>{v.label}</span>
+              <span className="mp-tag teal">{v.zec} ZEC</span>
+              <span className="mp-tag blue">{v.status}</span>
+              {v.gated && <span className="mp-tag">GATED</span>}
+              {v.status === "review" && <span className="mp-tag red">NEEDS A HUMAN</span>}
             </div>
-            <DelBtn onClick={() => deleteVault(v.id)} />
+            <div style={{ fontFamily: F.mono, fontSize: 10 }}>{v.lat.toFixed(4)}, {v.lng.toFixed(4)} · {v.radius}m · {fmtT(v.opens_at)} → {fmtT(v.closes_at)} · {v.attempts} claim attempts</div>
+            <div style={{ fontFamily: F.mono, fontSize: 9, wordBreak: "break-all", opacity: .7 }}>
+              {v.fund_txid && <>FUND {v.fund_txid}<br /></>}
+              {v.claim_txid && <>CLAIM {v.claim_txid}<br /></>}
+              {v.refund_txid && <>REFUND {v.refund_txid}</>}
+            </div>
           </div>
         ))}
       </>)}
@@ -144,10 +139,33 @@ export default function AdminDashboard({ onExit }) {
         {sessions.map((s, i) => (
           <div key={i} className="mp-kv">
             <span className="mp-kv-key" style={{ color: T.blue }}>{s.session_id}</span>
-            <span style={{ fontFamily: F.body, fontWeight: 700, fontSize: 14 }}>{s.user_id}</span>
+            <span style={{ fontFamily: F.mono, fontSize: 11 }}>{s.wallet_name}</span>
             <span style={{ fontFamily: F.mono, fontSize: 10 }}>{s.created?.slice(0, 16).replace("T", " ")}</span>
           </div>
         ))}
+      </>)}
+
+      {tab === "Escrow" && (<>
+        <div className="mp-section">VAULT ESCROW WALLET</div>
+        {!escrow ? <div className="mp-band"><span className="mp-quip">Loading…</span></div> : (<>
+          <div className="mp-grid">
+            <StatCell label="Owed To Vaults" value={`${escrow.owed_zec} ZEC`} />
+            <StatCell label="Confirmed Held" value={`${(((escrow.balance || {}).confirmed_orchard_balance || 0) + ((escrow.balance || {}).confirmed_sapling_balance || 0) + ((escrow.balance || {}).confirmed_transparent_balance || 0)) / 1e8} ZEC`} />
+          </div>
+          <div className="mp-band mp-band-w">
+            <div className="mp-lbl-sm" style={{ marginBottom: 6, color: T.blue }}>ESCROW ADDRESS</div>
+            <div className="mp-mono">{escrow.address || "···"}</div>
+            <div className="mp-lbl-sm" style={{ margin: "12px 0 6px", color: T.blue }}>VAULTS BY STATUS</div>
+            <div className="mp-mono">{Object.entries(escrow.vaults || {}).map(([k, n]) => `${k}: ${n}`).join(" · ") || "none"}</div>
+          </div>
+          <div className="mp-band" style={{ background: T.redTint }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <span className="mp-lbl-sm">ESCROW SEED · THE ONLY RECOVERY IF THIS BOX DIES</span>
+              <button className="mp-link" style={{ color: T.signout }} onClick={revealSeed}>{seed ? "HIDE" : "REVEAL"}</button>
+            </div>
+            {seed && <div className="mp-mono" style={{ marginTop: 10, fontSize: 13, lineHeight: 1.8 }}>{seed}</div>}
+          </div>
+        </>)}
       </>)}
       <div style={{ height: 20 }} />
     </div>

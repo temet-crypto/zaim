@@ -31,7 +31,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 CLI = os.getenv("ZAIM_CLI", os.getenv("ZECWALLET_CLI", "/app/zingo-cli"))
 SERVER = os.getenv("LIGHTWALLETD_SERVER", "https://zec.rocks:443")
 WDIR = os.getenv("WALLET_DIR", "/app/wallets")
-ADMIN_PASSWORD = os.getenv("ZAIM_ADMIN_PASSWORD", "zaim-admin-2026")
+# No default: unset means admin is OFF. A guessable shipped password on a
+# wallet server is worse than no admin panel at all.
+ADMIN_PASSWORD = os.getenv("ZAIM_ADMIN_PASSWORD", "")
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv(
     "ALLOWED_ORIGINS",
     "https://zaim.info,https://www.zaim.info,https://noscezaim.com,https://www.noscezaim.com",
@@ -48,11 +50,8 @@ FEE_ADDRESS = os.getenv("FEE_ADDRESS", "")          # house z-address that colle
 FEE_BPS = int(os.getenv("FEE_BPS", "0"))            # fee in basis points (100 = 1.00%)
 FEE_MIN_ZATS = int(os.getenv("FEE_MIN_ZATS", "0"))  # optional floor, in zatoshis
 
-def _warn_default_secret(name, value, default):
-    if value == default:
-        print(f"[SECURITY] {name} is using the built-in default — set it via env in production.", flush=True)
-
-_warn_default_secret("ZAIM_ADMIN_PASSWORD", ADMIN_PASSWORD, "zaim-admin-2026")
+if not ADMIN_PASSWORD:
+    print("[SECURITY] ZAIM_ADMIN_PASSWORD is unset — admin endpoints are disabled.", flush=True)
 
 sessions = {}
 wallet_cache = {}
@@ -406,17 +405,22 @@ async def startup_sync():
 async def lifespan(app: FastAPI):
     load_sessions()
     load_swaps()
+    load_vaults()
     sync_task = asyncio.create_task(periodic_sync())
     startup_task = asyncio.create_task(startup_sync())
     price_task = asyncio.create_task(periodic_price())
     seal_task = asyncio.create_task(periodic_seal())
+    vault_task = asyncio.create_task(periodic_vaults())
+    escrow_task = asyncio.create_task(ensure_escrow())
     yield
     sync_task.cancel()
     startup_task.cancel()
     price_task.cancel()
     seal_task.cancel()
+    vault_task.cancel()
+    escrow_task.cancel()
 
-app = FastAPI(title="ZAIM API", version="0.7.0", lifespan=lifespan)
+app = FastAPI(title="ZAIM API", version="0.9.1", lifespan=lifespan)
 # The SPA is served same-origin (nginx proxies /api), so CORS is belt-and-braces.
 # Restrict to the known origins; Bearer tokens are used (no cookies), so credentials are off.
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
@@ -434,11 +438,20 @@ class MsgReq(BaseModel):
     to_address: str
     message: str
 
+SESSION_MAX_SEC = 7 * 86400
+
 def get_session(request: Request):
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if token not in sessions:
         raise HTTPException(401, detail="Not authenticated")
     s = sessions[token]
+    # Sessions used to expire only when a restart pruned the file, so a
+    # long-lived process honored ancient tokens forever. Enforce the same
+    # 7-day cutoff at request time.
+    if time.time() - s.get("created", 0) > SESSION_MAX_SEC:
+        sessions.pop(token, None)
+        save_sessions()
+        raise HTTPException(401, detail="Session expired. Enter your seed to sign in again")
     wn = s.get("wallet_name", "")
     if wn:
         wdir, sealed = _wallet_paths(wn)
@@ -463,7 +476,10 @@ async def health():
                 sealed += 1
     return {"status": "ok" if cli_ok else "degraded", "backend": "zingo-cli (light client)",
             "server": SERVER, "cli_available": cli_ok, "wallets_active": active,
-            "wallets_sealed": sealed, "wallets": active + sealed, "sessions": len(sessions)}
+            "wallets_sealed": sealed, "wallets": active + sealed, "sessions": len(sessions),
+            # Disclosed so the UI can show the fee BEFORE a payment is sent.
+            # A fee nobody mentions is a fee nobody agreed to.
+            "fee_bps": FEE_BPS if FEE_ADDRESS else 0}
 
 def _meta_path(wn):
     return os.path.join(WDIR, wn, "zaim-meta.json")
@@ -686,6 +702,8 @@ async def send_payment(req: SendReq, session=Depends(get_session)):
     zatoshis = int((Decimal(str(req.amount)) * 100_000_000).to_integral_value(rounding=ROUND_DOWN))
     if zatoshis <= 0:
         raise HTTPException(400, detail="Amount too small")
+    if req.memo and len(req.memo.encode("utf-8")) > MEMO_BYTES_MAX:
+        raise HTTPException(400, detail="The memo is over 512 bytes. Shorten it")
     # Recipient output first; the app fee (if configured) is a second output to
     # the house address in the SAME transaction — atomic, one network fee.
     outputs = [{"address": req.to_address, "amount": zatoshis}]
@@ -702,10 +720,31 @@ async def send_payment(req: SendReq, session=Depends(get_session)):
     return {"result": result, "to": req.to_address, "amount": req.amount, "zatoshis": zatoshis,
             "fee_zatoshis": fee_zats, "fee_zec": fee_zats / 1e8}
 
+# An incoming shielded memo carries no sender — that is the protocol doing its
+# job, not a bug. So outgoing ZAIM messages embed a reply address in the memo
+# itself (the same convention Ywallet uses), and the reader lifts it back out.
+# Non-ZAIM wallets just see a readable "Reply-to:" line under the text.
+REPLY_TAG_RE = re.compile(r"\n?Reply-to:\s*([a-zA-Z0-9]{20,})\s*$")
+MEMO_BYTES_MAX = 511
+
+def _split_reply_tag(memo):
+    m = REPLY_TAG_RE.search(memo)
+    if not m:
+        return memo, ""
+    return REPLY_TAG_RE.sub("", memo).rstrip(), m.group(1)
+
 @app.post("/api/message/send")
 async def send_message(req: MsgReq, session=Depends(get_session)):
     wn = session["wallet_name"]
-    outputs = [{"address": req.to_address, "amount": DUST, "memo": req.message}]
+    if not req.message or not req.message.strip():
+        raise HTTPException(400, detail="The message is empty")
+    reply_addr = session.get("z_address", "")
+    memo = req.message + (f"\nReply-to: {reply_addr}" if reply_addr else "")
+    over = len(memo.encode("utf-8")) - MEMO_BYTES_MAX
+    if over > 0:
+        raise HTTPException(400, detail=f"Message too long by about {over} characters. "
+                                        "A memo holds 512 bytes and the reply address uses some")
+    outputs = [{"address": req.to_address, "amount": DUST, "memo": memo}]
     result = await azec(wn, "quicksend", [json.dumps(outputs)])
     await azec(wn, "save")
     wallet_cache.pop(wn, None)
@@ -723,16 +762,22 @@ async def get_messages(session=Depends(get_session)):
                 continue
             memos = tx.get("memos")
             memo = (memos[0] if isinstance(memos, list) and memos else None) or tx.get("memo")
-            if memo:
-                messages.append({
-                    "memo": memo,
-                    "txid": tx.get("txid", ""),
-                    "datetime": tx.get("datetime", ""),
-                    "height": tx.get("blockheight", ""),
-                    "amount": (tx.get("value", 0) / 1e8) if isinstance(tx.get("value"), int) else 0,
-                    "sent": str(tx.get("kind", "")).lower().replace("-", "").replace("_", "")
-                            in ("send", "sent", "sendtoself", "memotoself"),
-                })
+            if not memo:
+                continue
+            text, from_addr = _split_reply_tag(str(memo))
+            if not text or text.startswith("zaim-vault:"):
+                continue  # vault-funding bookkeeping, not conversation
+            messages.append({
+                "memo": text,
+                "from": from_addr,
+                "to": tx.get("recipient_address") or tx.get("address") or tx.get("toaddress") or "",
+                "txid": tx.get("txid", ""),
+                "datetime": tx.get("datetime", ""),
+                "height": tx.get("blockheight", ""),
+                "amount": (tx.get("value", 0) / 1e8) if isinstance(tx.get("value"), int) else 0,
+                "sent": str(tx.get("kind", "")).lower().replace("-", "").replace("_", "")
+                        in ("send", "sent", "sendtoself", "memotoself"),
+            })
         return {"messages": messages, "count": len(messages)}
     except Exception:
         return {"messages": [], "count": 0}
@@ -763,7 +808,7 @@ async def get_seed(session=Depends(get_session)):
 
 @app.get("/api/node/info")
 async def node_info():
-    return {"server": SERVER, "backend": "zecwallet-cli v1.8", "synced": True}
+    return {"server": SERVER, "backend": "zingo-cli (zingolib)", "synced": True}
 
 @app.get("/api/price")
 async def get_price():
@@ -1134,15 +1179,540 @@ async def swap_status(swap_id: str, session=Depends(get_session)):
     save_swaps()
     return {"swap": rec}
 
+# ─── GeoVault · escrowed location drops ───────────────────────────────────────
+# A vault is ZEC parked in a server-held escrow wallet plus a message, released
+# to the first wallet that shows up inside a radius during a time window.
+# Money moves twice: creator -> escrow when the vault is created, escrow ->
+# claimer when it is opened (or escrow -> creator when the window closes unused).
+#
+# Two honest limits, stated here so nobody has to read the code to find them:
+#   1. The location check runs on THIS side, not in the browser, but the
+#      coordinates still come from the claimer's device and a device can lie.
+#      Vaults are small-value drops, not a settlement layer.
+#   2. Messages are encrypted at rest with a server key and delivered inside
+#      the payout's shielded memo. In transit to the claimer that is real E2E
+#      encryption; at rest the server can read them, because the server has to
+#      hand the text to the CLI at claim time. Custodial design, custodial trust.
+
+ESCROW_WN = "_escrow"                 # leading underscore: never sealed, never counted as a user wallet
+GEO_FILE = os.path.join(WDIR, "_geovaults.json")
+VAULT_KEY_FILE = os.path.join(WDIR, "_vault_key")
+VAULT_MIN_ZATS = 100_000                                              # 0.001 ZEC
+VAULT_MAX_ZATS = int(float(os.getenv("ZAIM_VAULT_MAX_ZEC", "5")) * 1e8)
+PAYOUT_RESERVE = 30_000               # held back per vault to pay the claim or refund network fee
+MAX_RADIUS_M = 2000
+MAX_ACCURACY_M = 300                  # a fix vaguer than this proves nothing
+MAX_WINDOW_SEC = 90 * 86400
+FUNDING_GRACE_SEC = 2 * 3600          # unmatched funding tx after this = give up on the vault
+MEMO_MAX = 400                        # zcash memo is 512 bytes; leave room for the label line
+
+vaults = {}
+geo_lock = asyncio.Lock()             # single uvicorn worker, so this is the whole story on races
+escrow_addr = {"z": "", "t": "", "ua": ""}
+
+def save_vaults():
+    try:
+        _atomic_write_json(GEO_FILE, vaults)
+    except Exception as e:
+        print(f"[save_vaults] {e}", flush=True)
+
+def load_vaults():
+    global vaults
+    try:
+        if os.path.exists(GEO_FILE):
+            with open(GEO_FILE) as f:
+                vaults = json.load(f)
+    except Exception:
+        vaults = {}
+
+def _vault_key():
+    """Key for message-at-rest encryption. Generated once, kept 0600 next to the
+    wallets so a stolen _geovaults.json alone is not a pile of plaintext."""
+    try:
+        if os.path.exists(VAULT_KEY_FILE):
+            with open(VAULT_KEY_FILE, "rb") as f:
+                k = f.read()
+            if len(k) == 32:
+                return k
+        k = secrets.token_bytes(32)
+        fd = os.open(VAULT_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(k)
+        return k
+    except Exception as e:
+        print(f"[vault_key] {e}", flush=True)
+        raise HTTPException(500, detail="Vault storage is not available")
+
+def enc_msg(text):
+    if not text:
+        return ""
+    nonce = secrets.token_bytes(12)
+    blob = nonce + AESGCM(_vault_key()).encrypt(nonce, text.encode(), b"zaim-vault-v1")
+    return blob.hex()
+
+def dec_msg(hexblob):
+    if not hexblob:
+        return ""
+    try:
+        blob = bytes.fromhex(hexblob)
+        return AESGCM(_vault_key()).decrypt(blob[:12], blob[12:], b"zaim-vault-v1").decode()
+    except Exception:
+        return ""
+
+def haversine_m(lat1, lng1, lat2, lng2):
+    import math
+    R = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+async def ensure_escrow():
+    """Bring up the escrow wallet if it is not there. zingo-cli makes a fresh
+    wallet in any empty data dir, which is exactly what we want once and never
+    again — the dir is bind-mounted, so it survives restarts and rebuilds."""
+    wdir = os.path.join(WDIR, ESCROW_WN)
+    fresh = not os.path.isdir(wdir)
+    try:
+        await azec(ESCROW_WN, "sync", ["run"])
+        if fresh:
+            await asyncio.sleep(2)
+            await azec(ESCROW_WN, "save")
+            print("[escrow] created a new escrow wallet. Back up its seed via "
+                  "GET /api/admin/escrow before putting real value in it.", flush=True)
+        z, t, ua = await _read_addresses(ESCROW_WN)
+        escrow_addr.update({"z": z, "t": t, "ua": ua})
+        return bool(z or ua)
+    except Exception as e:
+        print(f"[escrow] not available: {e}", flush=True)
+        return False
+
+def _escrow_pay_addr():
+    return escrow_addr.get("z") or escrow_addr.get("ua") or ""
+
+def _claim_addr(session):
+    return session.get("z_address") or session.get("ua_address") or ""
+
+def _vault_public(v, viewer_wn=None, lat=None, lng=None):
+    """What a caller is allowed to see. The message is never included: it is
+    delivered by shielded memo when the vault is claimed, and nowhere else."""
+    mine = viewer_wn is not None and v.get("creator_wn") == viewer_wn
+    out = {
+        "id": v["id"], "label": v.get("label", ""), "lat": v["lat"], "lng": v["lng"],
+        "radius": v["radius"], "zec": v["zats"] / 1e8, "status": v["status"],
+        "opens_at": v["opens_at"], "closes_at": v["closes_at"],
+        "has_message": bool(v.get("message_enc")),
+        "gated": bool(v.get("target_address")),
+        "mine": mine, "created": v.get("created", 0),
+        "claimed_by_me": viewer_wn is not None and v.get("claimed_wn") == viewer_wn,
+        "claim_txid": v.get("claim_txid", "") if (mine or v.get("claimed_wn") == viewer_wn) else "",
+        "fund_txid": v.get("fund_txid", "") if mine else "",
+    }
+    if lat is not None and lng is not None:
+        out["distance_m"] = int(haversine_m(lat, lng, v["lat"], v["lng"]))
+    return out
+
+class VaultCreateReq(BaseModel):
+    label: str = ""
+    lat: float
+    lng: float
+    radius: int = 50
+    zec: float
+    message: str = ""
+    opens_at: float          # unix seconds; the client converts from local time
+    closes_at: float
+    target_address: str = ""
+
+class VaultClaimReq(BaseModel):
+    lat: float
+    lng: float
+    accuracy: float = 0
+
+@app.post("/api/geovault/create")
+async def geovault_create(req: VaultCreateReq, session=Depends(get_session)):
+    wn = session["wallet_name"]
+    if not await ensure_escrow() or not _escrow_pay_addr():
+        raise HTTPException(503, detail="Escrow is not available right now. Try again shortly")
+    if not (-90 <= req.lat <= 90) or not (-180 <= req.lng <= 180):
+        raise HTTPException(400, detail="Those coordinates are not on Earth")
+    if not (5 <= req.radius <= MAX_RADIUS_M):
+        raise HTTPException(400, detail=f"Radius must be between 5 and {MAX_RADIUS_M} meters")
+    zats = int((Decimal(str(req.zec)) * 100_000_000).to_integral_value(rounding=ROUND_DOWN))
+    if zats < VAULT_MIN_ZATS:
+        raise HTTPException(400, detail=f"Minimum vault is {VAULT_MIN_ZATS / 1e8:.4f} ZEC")
+    if zats > VAULT_MAX_ZATS:
+        raise HTTPException(400, detail=f"Maximum vault is {VAULT_MAX_ZATS / 1e8:.4f} ZEC")
+    now = time.time()
+    if req.closes_at <= req.opens_at:
+        raise HTTPException(400, detail="The window has to close after it opens")
+    if req.closes_at <= now:
+        raise HTTPException(400, detail="That window has already closed")
+    if req.closes_at - req.opens_at > MAX_WINDOW_SEC:
+        raise HTTPException(400, detail="A window can run for at most 90 days")
+    if len(req.message or "") > MEMO_MAX:
+        raise HTTPException(400, detail=f"Message must be under {MEMO_MAX} characters")
+    creator_addr = _claim_addr(session)
+    if not creator_addr:
+        raise HTTPException(400, detail="Your wallet has no shielded address yet. Reopen it and try again")
+
+    vid = secrets.token_hex(8)
+    total = zats + PAYOUT_RESERVE
+    # The ledger row is written BEFORE the money moves. If the process dies
+    # mid-send, a "funding" row survives for the sweeper to match against the
+    # chain; the reverse order would strand ZEC in escrow with no record of
+    # whose it was. A row without a landed transfer dies as "unfunded" after
+    # the grace period, so the early write costs nothing.
+    async with geo_lock:
+        vaults[vid] = {
+            "id": vid, "creator_wn": wn, "creator_address": creator_addr,
+            "label": (req.label or "Unnamed vault")[:60],
+            "lat": req.lat, "lng": req.lng, "radius": int(req.radius),
+            "zats": zats, "funded_zats": total,
+            "message_enc": enc_msg(req.message or ""),
+            "target_address": (req.target_address or "").strip(),
+            "opens_at": float(req.opens_at), "closes_at": float(req.closes_at),
+            "status": "funding", "fund_txid": "", "created": now,
+            "claimed_wn": "", "claimed_address": "", "claim_txid": "", "claimed_at": 0,
+            "attempts": [],
+        }
+        save_vaults()
+
+    async def _drop_row():
+        async with geo_lock:
+            vaults.pop(vid, None)
+            save_vaults()
+
+    # Funding is a plain shielded send with a tag in the memo, so the sweeper can
+    # match the arriving note to this vault. No app fee is charged on vaults.
+    outputs = [{"address": _escrow_pay_addr(), "amount": total, "memo": f"zaim-vault:{vid}"}]
+    try:
+        result = await azec(wn, "quicksend", [json.dumps(outputs)])
+    except HTTPException as e:
+        if e.status_code == 504:
+            # Timeout: the send may still have gone out. Keep the row; the
+            # sweeper arms it if the transfer lands, or retires it unfunded.
+            return {"vault": _vault_public(vaults[vid], wn), "funding_zec": total / 1e8,
+                    "message": "The funding payment is taking longer than usual. "
+                               "The vault arms by itself if it lands"}
+        await _drop_row()
+        detail = str(e.detail)
+        if "insufficient" in detail.lower() or "funds" in detail.lower():
+            raise HTTPException(400, detail=f"Not enough ZEC. A {zats / 1e8:.4f} ZEC vault costs "
+                                            f"{total / 1e8:.4f} ZEC including the payout fee reserve")
+        raise
+    await azec(wn, "save")
+    wallet_cache.pop(wn, None)
+    # zingo-cli reports some failures (an empty wallet, for one) in its output
+    # rather than in its exit code, so a 200 from the CLI is not proof of a send.
+    # No txid, no vault: never keep an escrow row the chain will not back.
+    fund_txid = _extract_txid(result)
+    if not fund_txid:
+        await _drop_row()
+        raw = json.dumps(result, default=str).lower()
+        print(f"[geovault] funding send produced no txid: {str(result)[:300]}", flush=True)
+        if "insufficient" in raw or "not enough" in raw or "no funds" in raw:
+            raise HTTPException(400, detail=f"Not enough ZEC. A {zats / 1e8:.4f} ZEC vault costs "
+                                            f"{total / 1e8:.4f} ZEC including the payout fee reserve")
+        if "scan blocks" in raw or "not synced" in raw or "syncing" in raw:
+            raise HTTPException(409, detail="Your wallet is still syncing with the chain. "
+                                            "Give it a minute and try again")
+        raise HTTPException(502, detail="The escrow payment did not go through, so no vault was created. "
+                                        "Nothing left your wallet")
+
+    async with geo_lock:
+        vaults[vid]["fund_txid"] = fund_txid
+        save_vaults()
+    asyncio.create_task(reconcile_vaults())
+    return {"vault": _vault_public(vaults[vid], wn), "funding_zec": total / 1e8,
+            "message": "Vault funded. It arms as soon as the escrow payment lands."}
+
+@app.get("/api/geovault/mine")
+async def geovault_mine(session=Depends(get_session)):
+    wn = session["wallet_name"]
+    me = _claim_addr(session)
+    out = []
+    for v in vaults.values():
+        gated_to_me = v.get("target_address") and me and v["target_address"] == me
+        if v.get("creator_wn") == wn or v.get("claimed_wn") == wn or gated_to_me:
+            out.append(_vault_public(v, wn))
+    out.sort(key=lambda r: r.get("created", 0), reverse=True)
+    return {"vaults": out, "escrow_address": _escrow_pay_addr()}
+
+@app.get("/api/geovault/nearby")
+async def geovault_nearby(lat: float, lng: float, km: float = 50, session=Depends(get_session)):
+    """Open drops within range. Gated vaults never appear here — they show up in
+    /mine for the wallet they are addressed to. The radius is clamped: without
+    the cap, one request with a huge km would dump the exact coordinates of
+    every open vault in the world, and drop locations are only anyone's
+    business locally."""
+    if not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
+        raise HTTPException(400, detail="Those coordinates are not on Earth")
+    km = max(0.1, min(float(km), 50.0))
+    wn = session["wallet_name"]
+    now = time.time()
+    out = []
+    for v in vaults.values():
+        if v["status"] != "armed" or v.get("target_address"):
+            continue
+        if v["closes_at"] <= now:
+            continue
+        d = haversine_m(lat, lng, v["lat"], v["lng"])
+        if d <= km * 1000:
+            out.append(_vault_public(v, wn, lat, lng))
+    out.sort(key=lambda r: r.get("distance_m", 0))
+    return {"vaults": out[:50]}
+
+@app.get("/api/geovault/{vault_id}")
+async def geovault_get(vault_id: str, session=Depends(get_session)):
+    v = vaults.get(vault_id)
+    if not v:
+        raise HTTPException(404, detail="No vault with that id")
+    # A gated vault's coordinates are nobody's business but the two wallets in it,
+    # even for someone who guessed or was handed the id.
+    if (v.get("target_address") and v["target_address"] != _claim_addr(session)
+            and v.get("creator_wn") != session["wallet_name"]):
+        raise HTTPException(404, detail="No vault with that id")
+    return {"vault": _vault_public(v, session["wallet_name"])}
+
+@app.post("/api/geovault/{vault_id}/claim")
+async def geovault_claim(vault_id: str, req: VaultClaimReq, session=Depends(get_session)):
+    """Every rule that matters is checked here, under the lock, before a single
+    zatoshi moves. The client's job is only to report where it thinks it is."""
+    wn = session["wallet_name"]
+    to_addr = _claim_addr(session)
+    if not to_addr:
+        raise HTTPException(400, detail="Your wallet has no shielded address to pay out to")
+    now = time.time()
+    async with geo_lock:
+        v = vaults.get(vault_id)
+        if not v:
+            raise HTTPException(404, detail="No vault with that id")
+        if v["status"] == "claimed":
+            raise HTTPException(409, detail="Someone already opened this vault")
+        if v["status"] == "claiming":
+            raise HTTPException(409, detail="A claim is already going through")
+        if v["status"] == "funding":
+            raise HTTPException(409, detail="This vault is still being funded")
+        if v["status"] != "armed":
+            raise HTTPException(409, detail=f"This vault is {v['status']}")
+        if now < v["opens_at"]:
+            raise HTTPException(403, detail="The window has not opened yet")
+        if now > v["closes_at"]:
+            raise HTTPException(403, detail="The window has closed")
+        if v.get("creator_wn") == wn:
+            raise HTTPException(403, detail="You cannot claim your own vault. Cancel it instead")
+        if v.get("target_address") and v["target_address"] != to_addr:
+            raise HTTPException(403, detail="This vault is addressed to a different wallet")
+        acc = max(0.0, float(req.accuracy or 0))
+        if acc > MAX_ACCURACY_M:
+            raise HTTPException(400, detail=f"Your GPS fix is {int(acc)}m vague. Move somewhere with a clearer sky")
+        dist = haversine_m(req.lat, req.lng, v["lat"], v["lng"])
+        # Accuracy earns some slack, but never more than the radius itself:
+        # otherwise a claimed 300m error would open a 50m vault from down the road.
+        slack = min(acc, float(v["radius"]))
+        v.setdefault("attempts", []).append({"wn": wn, "at": now, "dist": int(dist), "acc": int(acc)})
+        v["attempts"] = v["attempts"][-20:]
+        if dist > v["radius"] + slack:
+            save_vaults()
+            raise HTTPException(403, detail=f"You are {int(dist)}m away. This vault opens within {v['radius']}m")
+        v["status"] = "claiming"
+        v["claimed_wn"] = wn
+        v["claimed_address"] = to_addr
+        save_vaults()
+
+    # Payout happens outside the lock: it talks to the chain and takes seconds.
+    try:
+        msg = dec_msg(v.get("message_enc", ""))
+        memo = f"ZAIM vault: {v.get('label', '')}".strip()
+        if msg:
+            memo = (memo + "\n\n" + msg)[:MEMO_MAX + 60]
+        await ensure_escrow()
+        await azec(ESCROW_WN, "sync", ["run"])
+        outputs = [{"address": to_addr, "amount": v["zats"], "memo": memo}]
+        result = await azec(ESCROW_WN, "quicksend", [json.dumps(outputs)])
+        await azec(ESCROW_WN, "save")
+        txid = _extract_txid(result)
+    except Exception as e:
+        # A timeout is the one failure where the payment may still have gone out.
+        # Retrying that would pay twice, so it parks in "review" for a human
+        # instead of going back on the shelf.
+        ambiguous = isinstance(e, HTTPException) and e.status_code == 504
+        async with geo_lock:
+            v["status"] = "review" if ambiguous else "armed"
+            if not ambiguous:
+                v["claimed_wn"] = ""
+                v["claimed_address"] = ""
+            save_vaults()
+        print(f"[geovault] payout failed for {vault_id} (ambiguous={ambiguous}): {e}", flush=True)
+        if ambiguous:
+            raise HTTPException(504, detail="The payout timed out on the network. We are checking it, "
+                                            "do not try again yet")
+        raise HTTPException(502, detail="The payout did not go through. Nothing was taken from the vault, try again")
+    if not txid:
+        # Same reasoning: the send reported no failure and no txid, so we cannot
+        # know whether it landed. Park it rather than risk a second payout.
+        async with geo_lock:
+            v["status"] = "review"
+            save_vaults()
+        print(f"[geovault] payout with no txid for {vault_id}: {str(result)[:300]}", flush=True)
+        raise HTTPException(502, detail="The payout could not be confirmed. It is being checked, "
+                                        "do not try again yet")
+    async with geo_lock:
+        v["status"] = "claimed"
+        v["claim_txid"] = txid
+        v["claimed_at"] = time.time()
+        save_vaults()
+    wallet_cache.pop(wn, None)
+    return {"ok": True, "zec": v["zats"] / 1e8, "txid": txid, "message": msg,
+            "vault": _vault_public(v, wn)}
+
+@app.post("/api/geovault/{vault_id}/cancel")
+async def geovault_cancel(vault_id: str, session=Depends(get_session)):
+    """Creator pulls the vault back before anyone opens it. Same refund path the
+    expiry sweeper uses."""
+    wn = session["wallet_name"]
+    async with geo_lock:
+        v = vaults.get(vault_id)
+        if not v or v.get("creator_wn") != wn:
+            raise HTTPException(404, detail="No vault with that id")
+        if v["status"] not in ("armed", "funding"):
+            raise HTTPException(409, detail=f"This vault is {v['status']}")
+        if v["status"] == "funding":
+            raise HTTPException(409, detail="Wait for funding to land, then cancel")
+        v["status"] = "refunding"
+        save_vaults()
+    ok = await _refund_vault(v, "cancelled")
+    if not ok:
+        raise HTTPException(502, detail="The refund did not go through. The vault is unchanged, try again")
+    return {"ok": True, "vault": _vault_public(v, wn)}
+
+async def _refund_vault(v, final_status):
+    """Escrow -> creator. Used by cancel and by the expiry sweeper."""
+    try:
+        await ensure_escrow()
+        await azec(ESCROW_WN, "sync", ["run"])
+        outputs = [{"address": v["creator_address"], "amount": v["zats"],
+                    "memo": f"ZAIM vault returned: {v.get('label', '')}".strip()[:MEMO_MAX]}]
+        result = await azec(ESCROW_WN, "quicksend", [json.dumps(outputs)])
+        await azec(ESCROW_WN, "save")
+        txid = _extract_txid(result)
+        if not txid:
+            # Unconfirmable: park it. The sweeper runs every 90s and a blind
+            # retry loop on an unconfirmable send is how escrow pays twice.
+            async with geo_lock:
+                v["status"] = "review"
+                save_vaults()
+            print(f"[geovault] refund with no txid for {v['id']}: {str(result)[:300]}", flush=True)
+            return False
+        async with geo_lock:
+            v["status"] = final_status
+            v["refund_txid"] = txid
+            v["refunded_at"] = time.time()
+            save_vaults()
+        wallet_cache.pop(v.get("creator_wn", ""), None)
+        return True
+    except Exception as e:
+        ambiguous = isinstance(e, HTTPException) and e.status_code == 504
+        async with geo_lock:
+            v["status"] = "review" if ambiguous else "armed"
+            save_vaults()
+        print(f"[geovault] refund failed for {v['id']} (ambiguous={ambiguous}): {e}", flush=True)
+        return False
+
+def _funding_landed(parsed, vid, need_zats):
+    """True only if a single escrow transfer carries BOTH the vault's memo tag
+    and at least the full funded amount. Matching the tag alone would let a
+    dust transaction with a copied memo arm a vault escrow never received."""
+    tag = f"zaim-vault:{vid}"
+    for t in parsed:
+        if not isinstance(t, dict):
+            continue
+        memos = t.get("memos") if isinstance(t.get("memos"), list) else []
+        blob = " ".join(str(m) for m in memos) + " " + str(t.get("memo", ""))
+        if tag not in blob:
+            continue
+        try:
+            val = int(t.get("value", 0))
+        except (TypeError, ValueError):
+            val = 0
+        if val >= need_zats:
+            return True
+        print(f"[geovault] tagged transfer for {vid} carries {val} < {need_zats} zats; ignoring", flush=True)
+    return False
+
+async def reconcile_vaults():
+    """Arm funded vaults, refund expired ones. Funding is confirmed by finding
+    the tagged, full-value transfer in the escrow wallet's own list, so a vault
+    never arms on the strength of a send we merely attempted."""
+    pending = [v for v in vaults.values() if v["status"] == "funding"]
+    expired = [v for v in vaults.values()
+               if v["status"] == "armed" and time.time() > v["closes_at"]]
+    if not pending and not expired:
+        return
+    parsed = []
+    if pending:
+        try:
+            await ensure_escrow()
+            await azec(ESCROW_WN, "sync", ["run"])
+            txs = await azec(ESCROW_WN, "value_transfers")
+            parsed = txs if isinstance(txs, list) else parse_transactions(txs)
+        except Exception as e:
+            print(f"[geovault] escrow scan failed: {e}", flush=True)
+        async with geo_lock:
+            for v in pending:
+                if _funding_landed(parsed, v["id"], v.get("funded_zats", v["zats"])):
+                    v["status"] = "armed"
+                    v["armed_at"] = time.time()
+                elif time.time() - v.get("created", 0) > FUNDING_GRACE_SEC:
+                    v["status"] = "unfunded"
+            save_vaults()
+    for v in expired:
+        async with geo_lock:
+            if v["status"] != "armed":
+                continue
+            v["status"] = "refunding"
+            save_vaults()
+        await _refund_vault(v, "expired")
+
+async def periodic_vaults():
+    while True:
+        await asyncio.sleep(90)
+        try:
+            await reconcile_vaults()
+        except Exception as e:
+            print(f"[periodic_vaults] {e}", flush=True)
+
 # ─── Admin ────────────────────────────────────────────────────────────────────
 # There are no accounts to administer any more. Admin is ops only: wallet and
 # session counts, and a force-seal for maintenance windows.
 
 def get_admin(request: Request):
+    if not ADMIN_PASSWORD:
+        raise HTTPException(403, detail="Admin is disabled. Set ZAIM_ADMIN_PASSWORD to enable it")
     token = request.headers.get("X-Admin-Token", "")
     if not hmac.compare_digest(token, ADMIN_PASSWORD):
         raise HTTPException(403, detail="Admin access denied")
     return True
+
+@app.get("/api/admin/geovaults")
+async def admin_geovaults(admin=Depends(get_admin)):
+    """Ops view of the vault ledger. Coordinates and amounts, never messages:
+    the operator holding the at-rest key is no reason to put plaintext in a
+    dashboard."""
+    out = []
+    for v in sorted(vaults.values(), key=lambda r: r.get("created", 0), reverse=True):
+        out.append({
+            "id": v["id"], "label": v.get("label", ""), "status": v["status"],
+            "zec": v["zats"] / 1e8, "funded_zec": v.get("funded_zats", 0) / 1e8,
+            "lat": v["lat"], "lng": v["lng"], "radius": v["radius"],
+            "opens_at": v["opens_at"], "closes_at": v["closes_at"],
+            "creator_wn": v.get("creator_wn", ""), "claimed_wn": v.get("claimed_wn", ""),
+            "fund_txid": v.get("fund_txid", ""), "claim_txid": v.get("claim_txid", ""),
+            "refund_txid": v.get("refund_txid", ""), "attempts": len(v.get("attempts", [])),
+            "has_message": bool(v.get("message_enc")), "gated": bool(v.get("target_address")),
+        })
+    return {"geovaults": out}
 
 @app.get("/api/admin/stats")
 async def admin_stats(admin=Depends(get_admin)):
@@ -1175,6 +1745,33 @@ async def admin_sessions(admin=Depends(get_admin)):
             "created": _dt.datetime.utcfromtimestamp(sess.get("created", 0)).isoformat() if sess.get("created") else "",
         })
     return {"sessions": out}
+
+@app.get("/api/admin/escrow")
+async def admin_escrow(admin=Depends(get_admin), reveal_seed: bool = False):
+    """Escrow health and, on request, its seed. That seed is the ONLY way to
+    recover vault funds if this box dies, so back it up somewhere off the box."""
+    await ensure_escrow()
+    bal = {}
+    try:
+        bal = parse_balance(await azec(ESCROW_WN, "balance"))
+    except Exception as e:
+        bal = {"error": str(e)[:120]}
+    by_status = {}
+    owed = 0
+    for v in vaults.values():
+        by_status[v["status"]] = by_status.get(v["status"], 0) + 1
+        if v["status"] in ("armed", "claiming", "refunding", "review"):
+            owed += v["zats"]
+    out = {"address": _escrow_pay_addr(), "balance": bal, "vaults": by_status,
+           "owed_zats": owed, "owed_zec": owed / 1e8}
+    if reveal_seed:
+        try:
+            seed_text, birthday = _parse_recovery(await azec(ESCROW_WN, "recovery_info"))
+            out["seed"] = seed_text
+            out["birthday"] = birthday
+        except Exception as e:
+            out["seed_error"] = str(e)[:120]
+    return out
 
 @app.post("/api/admin/seal_all")
 async def admin_seal_all(admin=Depends(get_admin)):
