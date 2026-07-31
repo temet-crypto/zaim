@@ -3,6 +3,7 @@
 // use, so a redesign of the app carries through here instead of going stale.
 // Nothing here is interactive. It is a look, not a demo.
 import { T, F } from "./styles/maxpain.js";
+import { QRCodeSVG } from "qrcode.react";
 
 const BackArrow = ({ onClick }) => (
   <button onClick={onClick} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", display: "flex" }} aria-label="Back">
@@ -141,6 +142,46 @@ const GeoVisual = () => (
   </div>
 );
 
+const RequestVisual = () => (
+  <div style={{ display: "flex", alignItems: "stretch" }}>
+    <div style={{ padding: 12, borderRight: `2px solid ${T.black}`, background: T.white, display: "flex", alignItems: "center" }}>
+      <div style={{ padding: 5, border: `2px solid ${T.black}` }}>
+        <QRCodeSVG value="zcash:zs1demo7request4visual9only?amount=0.25" size={74} />
+      </div>
+    </div>
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ padding: "9px 11px", borderBottom: `2px solid ${T.black}`, background: T.white }}>
+        <Lbl>Requesting</Lbl>
+        <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 22, lineHeight: 1, marginTop: 4 }}>0.2500 ZEC</div>
+      </div>
+      <div style={{ padding: "9px 11px", background: T.white }}>
+        <Lbl color={T.blue}>zcash: link · fresh address</Lbl>
+        <div style={{ fontFamily: F.mono, fontSize: 9, marginTop: 4, wordBreak: "break-all", opacity: .7 }}>zcash:zs1kq…x2f?amount=0.25</div>
+        <span style={{ display: "inline-block", marginTop: 6, fontFamily: F.display, fontWeight: 800, fontSize: 10, padding: "2px 6px", background: T.teal, color: T.black, textTransform: "uppercase" }}>Paid</span>
+      </div>
+    </div>
+  </div>
+);
+
+const SyncVisual = () => (
+  <div>
+    {[["N", "Naomi", "zs1w8q…tu1"], ["M", "Marcus", "u1kf…3lsv"]].map(([i, name, addr], idx) => (
+      <div key={name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderBottom: `2px solid ${T.black}`, background: T.white }}>
+        <div style={{ width: 30, height: 30, background: T.blue, color: T.white, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: F.display, fontWeight: 800, fontSize: 14, flexShrink: 0 }}>{i}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontFamily: F.body, fontWeight: 700, fontSize: 13 }}>{name}</div>
+          <div style={{ fontFamily: F.mono, fontSize: 9, opacity: .7 }}>{addr}</div>
+        </div>
+        <span style={{ fontFamily: F.mono, fontSize: 8, letterSpacing: 1, color: T.teal, textTransform: "uppercase" }}>On chain</span>
+      </div>
+    ))}
+    <div style={{ padding: "8px 11px", background: T.white }}>
+      <Lbl color={T.blue}>Encrypted memos to yourself · 1 transaction</Lbl>
+      <div style={{ fontFamily: F.mono, fontSize: 9, marginTop: 4, opacity: .7 }}>zaim-sync:v1:1/2:1785… · only your seed reads it</div>
+    </div>
+  </div>
+);
+
 const SeedVisual = () => (
   <div>
     {[["Identity", "your seed · no account", T.blue], ["Key storage", "server side · custodial", T.black], ["At rest", "sealed · seed encrypted", T.teal]].map(([k, v, c], i) => (
@@ -178,22 +219,32 @@ export default function FeaturesScreen({ onBack }) {
         <SendVisual />
       </Feature>
 
-      <Feature n="03" name="Messages"
+      <Feature n="03" name="Payment requests"
+        desc="Ask for an exact amount with a zcash: link and QR that any Zcash wallet can pay, built on a fresh address every time so your invoices cannot be tied together.">
+        <RequestVisual />
+      </Feature>
+
+      <Feature n="04" name="Messages"
         desc="Each message is a real shielded transaction carrying an encrypted memo, so the chain proves it happened while the words stay between you and the recipient.">
         <MessagesVisual />
       </Feature>
 
-      <Feature n="04" name="Cross chain swaps"
+      <Feature n="05" name="Chain synced contacts"
+        desc="Your contact book can ride the chain as encrypted memos written to yourself, so a new device with your seed pulls your people with no server copy anywhere.">
+        <SyncVisual />
+      </Feature>
+
+      <Feature n="06" name="Cross chain swaps"
         desc="Trade BTC, ETH, SOL or USDC for ZEC and back through NEAR Intents, with no account and no order book, and cancel any swap you have not funded.">
         <SwapVisual />
       </Feature>
 
-      <Feature n="05" name="GeoVault" tag="IN TESTING" tagColor={T.red}
+      <Feature n="07" name="GeoVault" tag="IN TESTING" tagColor={T.red}
         desc="Park ZEC and a message at a set of coordinates in ZAIM escrow, where only someone inside the radius during your window can release it, and anything nobody claims comes back to you when the window closes.">
         <GeoVisual />
       </Feature>
 
-      <Feature n="06" name="Seed only sign in"
+      <Feature n="08" name="Seed only sign in"
         desc="There is no username and no password, because your seed phrase is the login, and signing out seals the wallet with a key derived from that same seed.">
         <SeedVisual />
       </Feature>

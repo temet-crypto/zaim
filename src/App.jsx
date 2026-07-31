@@ -5,6 +5,7 @@ import AdminDashboard from "./AdminDashboard";
 import FeaturesScreen from "./Features.jsx";
 import { T, F, MAXPAIN_CSS } from "./styles/maxpain.js";
 import { apiGet, apiPost, takeNotice } from "./api.js";
+import { QRCodeSVG } from "qrcode.react";
 
 // four geometric primitives for the bottom nav (icon always white)
 const Prim = {
@@ -31,11 +32,39 @@ const API = {
   getPrice: () => API.get("/price"),
   getSeed: () => API.get("/wallet/seed"),
   nodeInfo: () => API.get("/node/info"),
+  createRequest: (amount, memo) => API.post("/request/create", { amount, memo }),
+  listRequests: () => API.get("/request/list"),
+  syncPush: (contacts) => API.post("/sync/push", { contacts }),
+  syncPull: () => API.get("/sync/pull"),
 };
+
+// ZIP-321 parser for the Send screen: paste a zcash: link from any wallet and
+// the fields fill themselves. Memo arrives base64url encoded per the spec.
+function parseZcashUri(s) {
+  if (!s || !s.toLowerCase().startsWith("zcash:")) return null;
+  const rest = s.slice(6);
+  const [addr, query] = rest.split("?");
+  if (!addr) return null;
+  const out = { to: addr, amount: "", memo: "" };
+  if (query) {
+    for (const kv of query.split("&")) {
+      const [k, v] = kv.split("=");
+      if (k === "amount" && v) out.amount = v;
+      if (k === "memo" && v) {
+        try {
+          const b64 = v.replace(/-/g, "+").replace(/_/g, "/");
+          out.memo = atob(b64 + "=".repeat((4 - b64.length % 4) % 4));
+        } catch (e) { }
+      }
+    }
+  }
+  return out;
+}
 
 // Dev log shown on the sign in screen. ZAIM entries only. Newest first.
 // The status bar shows the first sentence of the newest entry.
 const ZAIM_LOG = [
+  { d: "Jul 30 2026", v: "0.9.2", t: "Payment requests and chain synced contacts. Create a request any Zcash wallet can pay, with a fresh address every time so invoices cannot be linked. And your contact book can now follow your seed: encrypted memos written to yourself on the chain itself. New device, same seed, your people are there. No server copy, ever." },
   { d: "Jul 30 2026", v: "0.9.1", t: "Privacy and honesty pass. Fonts now load from our own server, so opening ZAIM tells nobody else you did. Messages thread by contact with a reply address inside the memo. Payment fees show before you send. Vault escrow now verifies funding on chain before a vault arms." },
   { d: "Jul 20 2026", v: "0.9.0", t: "New wallet engine, built and tested ahead of the July 28 Ironwood network upgrade. Wallet infrastructure moved to a maintained server." },
   { d: "Jul 19 2026", v: "0.8.0", t: "Seed only sign in. No usernames, no passwords, no accounts. Signing out seals your wallet with encryption derived from your own seed." },
@@ -328,9 +357,10 @@ function HomeScreen({ onNav }) {
         </>}
       </div>
       <div style={{ display: "flex", borderBottom: `2px solid ${T.black}` }}>
-        <button className="mp-btn" style={{ borderRight: `2px solid ${T.black}`, borderLeft: "none", borderTop: "none", borderBottom: "none" }} onClick={() => onNav("send")}>SEND</button>
-        <button className="mp-btn" style={{ borderRight: `2px solid ${T.black}`, borderLeft: "none", borderTop: "none", borderBottom: "none", background: T.blue }} onClick={() => onNav("swap")}>SWAP</button>
-        <button className="mp-btn ghost" style={{ border: "none" }} onClick={() => { if (address) { navigator.clipboard?.writeText(address); setToast("Address copied"); setTimeout(() => setToast(""), 1800); } }}>COPY</button>
+        <button className="mp-btn" style={{ fontSize: 13, padding: "15px 4px", borderRight: `2px solid ${T.black}`, borderLeft: "none", borderTop: "none", borderBottom: "none" }} onClick={() => onNav("send")}>SEND</button>
+        <button className="mp-btn" style={{ fontSize: 13, padding: "15px 4px", borderRight: `2px solid ${T.black}`, borderLeft: "none", borderTop: "none", borderBottom: "none", background: T.teal, color: T.black }} onClick={() => onNav("request")}>REQUEST</button>
+        <button className="mp-btn" style={{ fontSize: 13, padding: "15px 4px", borderRight: `2px solid ${T.black}`, borderLeft: "none", borderTop: "none", borderBottom: "none", background: T.blue }} onClick={() => onNav("swap")}>SWAP</button>
+        <button className="mp-btn ghost" style={{ fontSize: 13, padding: "15px 4px", border: "none" }} onClick={() => { if (address) { navigator.clipboard?.writeText(address); setToast("Address copied"); setTimeout(() => setToast(""), 1800); } }}>COPY</button>
       </div>
       <div className="mp-section">RECENT TRANSACTIONS</div>
       {txs.length === 0 ? (
@@ -342,6 +372,8 @@ function HomeScreen({ onNav }) {
         const self = kind.includes("self");
         const isIn = !self && !kind.startsWith("sen");
         tx.memo = (tx.memo || (Array.isArray(tx.memos) && tx.memos.length ? tx.memos[0] : "") || "").split("\nReply-to:")[0];
+        if (tx.memo.startsWith("zaim-sync:")) tx.memo = "contact sync";
+        if (tx.memo.startsWith("zaim-vault:")) tx.memo = "vault funding";
         return (
           <div key={i} className="mp-row">
             <div style={{ width: 64, height: 40, display: "flex", alignItems: "center", justifyContent: "center", background: self ? T.black : isIn ? T.teal : T.red, color: self ? T.white : isIn ? T.black : T.white, fontFamily: F.display, fontWeight: 800, fontSize: 12, letterSpacing: .5, flexShrink: 0 }}>{self ? "SELF" : isIn ? "IN" : "OUT"}</div>
@@ -387,7 +419,14 @@ function SendScreen({ onBack }) {
     <div className="mp-scroll">
       <div className="mp-head"><div style={{ display: "flex", alignItems: "center", gap: 12 }}><BackArrow onClick={onBack} /><div className="mp-title">Send ZEC</div></div></div>
       <div className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>TO ADDRESS</div><input className="mp-input" value={to} onChange={e => setTo(e.target.value)} placeholder="Shielded or unified address" /></div>
+        <div>
+          <div className="mp-lbl-sm" style={{ marginBottom: 6 }}>TO ADDRESS · OR PASTE A ZCASH: LINK</div>
+          <input className="mp-input" value={to} onChange={e => {
+            const uri = parseZcashUri(e.target.value);
+            if (uri) { setTo(uri.to); if (uri.amount) setAmount(uri.amount); if (uri.memo) setMemo(uri.memo); }
+            else setTo(e.target.value);
+          }} placeholder="Address or zcash: payment link" />
+        </div>
         <div>
           <div className="mp-lbl-sm" style={{ marginBottom: 6 }}>AMOUNT · ZEC</div>
           <input className="mp-input" type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.0000" />
@@ -401,10 +440,108 @@ function SendScreen({ onBack }) {
   );
 }
 
+function RequestScreen({ onBack }) {
+  const [amount, setAmount] = useState(""); const [memo, setMemo] = useState("");
+  const [loading, setLoading] = useState(false); const [error, setError] = useState("");
+  const [current, setCurrent] = useState(null);   // the request just created
+  const [past, setPast] = useState([]); const [copied, setCopied] = useState(false);
+  const loadPast = useCallback(() => { API.listRequests().then(r => setPast(r.requests || [])).catch(() => { }); }, []);
+  useEffect(() => {
+    loadPast();
+    const t = setInterval(() => { if (!document.hidden) loadPast(); }, 30000);
+    return () => clearInterval(t);
+  }, [loadPast]);
+  const create = async () => {
+    if (!amount || parseFloat(amount) <= 0) return setError("Enter an amount");
+    setLoading(true); setError("");
+    try { const r = await API.createRequest(parseFloat(amount), memo.trim()); setCurrent(r.request); setAmount(""); setMemo(""); loadPast(); }
+    catch (e) { setError(e.message); }
+    setLoading(false);
+  };
+  const copyUri = () => { navigator.clipboard?.writeText(current.uri); setCopied(true); setTimeout(() => setCopied(false), 1600); };
+  if (current) return (
+    <div className="mp-scroll">
+      <div className="mp-head"><div style={{ display: "flex", alignItems: "center", gap: 12 }}><BackArrow onClick={() => setCurrent(null)} /><div className="mp-title">Request</div></div></div>
+      <div className="mp-band-blue" style={{ padding: "24px 16px", borderBottom: `2px solid ${T.black}` }}>
+        <div className="mp-lbl" style={{ color: T.white, marginBottom: 8 }}>REQUESTING</div>
+        <div className="mp-big" style={{ color: T.white, fontSize: 44 }}>{Number(current.zec).toFixed(4)} ZEC</div>
+        {current.memo && <div style={{ fontFamily: F.mono, fontSize: 11, color: T.white, marginTop: 8 }}>{current.memo}</div>}
+      </div>
+      <div className="mp-band mp-band-w" style={{ textAlign: "center" }}>
+        <div style={{ display: "inline-block", padding: 10, border: `2px solid ${T.black}`, background: T.white }}>
+          <QRCodeSVG value={current.uri} size={180} />
+        </div>
+        <div className="mp-mono" style={{ marginTop: 12, wordBreak: "break-all", fontSize: 11 }}>{current.uri}</div>
+        <button className="mp-link" style={{ marginTop: 8 }} onClick={copyUri}>{copied ? "COPIED" : "TAP TO COPY LINK"}</button>
+      </div>
+      <div className="mp-band">
+        <div className="mp-quip">Payable from any Zcash wallet. Zashi, Ywallet, another ZAIM, all the same. A fresh address every time, so your requests cannot be tied together.</div>
+      </div>
+      <div style={{ padding: 16 }}><button className="mp-btn" onClick={() => setCurrent(null)}>DONE</button></div>
+    </div>
+  );
+  return (
+    <div className="mp-scroll">
+      <div className="mp-head"><div style={{ display: "flex", alignItems: "center", gap: 12 }}><BackArrow onClick={onBack} /><div className="mp-title">Request ZEC</div></div></div>
+      <div className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>AMOUNT · ZEC</div><input className="mp-input" type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.0000" /></div>
+        <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>NOTE · OPTIONAL · THE PAYER SEES IT</div><input className="mp-input" value={memo} onChange={e => setMemo(e.target.value)} maxLength={200} placeholder="What is this for" /></div>
+        {error && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase", letterSpacing: .5 }}>{error}</div>}
+        <button className="mp-btn" onClick={create} disabled={loading}>{loading ? "CREATING…" : "CREATE REQUEST"}</button>
+      </div>
+      {past.length > 0 && <>
+        <div className="mp-section">YOUR REQUESTS</div>
+        {past.map(r => (
+          <div key={r.id} className="mp-row" style={{ cursor: "pointer" }} onClick={() => setCurrent(r)}>
+            <div style={{ width: 64, height: 40, display: "flex", alignItems: "center", justifyContent: "center", background: r.paid ? T.teal : T.blue, color: r.paid ? T.black : T.white, fontFamily: F.display, fontWeight: 800, fontSize: 12 }}>{r.paid ? "PAID" : "OPEN"}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontFamily: F.body, fontWeight: 600, fontSize: 14 }}>{Number(r.zec).toFixed(4)} ZEC</div>
+              {r.memo && <div style={{ fontFamily: F.mono, fontSize: 11, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.memo}</div>}
+            </div>
+            <div style={{ fontFamily: F.mono, fontSize: 10 }}>{new Date(r.created * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</div>
+          </div>
+        ))}
+      </>}
+      <div style={{ height: 12 }} />
+    </div>
+  );
+}
+
 function MessengerScreen({ onNav }) {
   const [contacts, setContacts] = useState([]); const [showAdd, setShowAdd] = useState(false);
   const [nn, setNn] = useState(""); const [na, setNa] = useState(""); const [err, setErr] = useState("");
+  const [chainTs, setChainTs] = useState(null);   // newest sync set on chain, if any
+  const [syncing, setSyncing] = useState(false); const [syncMsg, setSyncMsg] = useState("");
   useEffect(() => { setContacts(Contacts.list()); }, []);
+  // Pull is free (reading your own memos). Merge chain contacts into local;
+  // local entries win on address collisions.
+  useEffect(() => {
+    API.syncPull().then(r => {
+      if (!r.found) return;
+      setChainTs(r.ts);
+      const local = Contacts.list();
+      const have = new Set(local.map(c => c.address));
+      const incoming = (r.contacts || []).filter(c => c && c.address && c.name && !have.has(c.address));
+      if (incoming.length) {
+        const merged = [...local, ...incoming];
+        localStorage.setItem("zaim_contacts", JSON.stringify(merged));
+        setContacts(merged);
+        setSyncMsg(`${incoming.length} contact${incoming.length > 1 ? "s" : ""} pulled from the chain`);
+        setTimeout(() => setSyncMsg(""), 4000);
+      }
+    }).catch(() => { });
+  }, []);
+  // Push writes the book to the chain as one transaction of encrypted memos.
+  // It spends dust, so it only ever happens on an explicit, confirmed tap.
+  const push = async () => {
+    const book = Contacts.list();
+    if (!book.length) { setSyncMsg("Nothing to sync yet"); setTimeout(() => setSyncMsg(""), 2500); return; }
+    if (!window.confirm(`Write ${book.length} contact${book.length > 1 ? "s" : ""} to the chain as encrypted memos? Costs about 0.001 ZEC. Only your seed can read them.`)) return;
+    setSyncing(true);
+    try { const r = await API.syncPush(book); setChainTs(r.ts); setSyncMsg(`Synced · ${r.chunks} memo${r.chunks > 1 ? "s" : ""} · ${r.cost_zec} ZEC`); }
+    catch (e) { setSyncMsg(e.message); }
+    setSyncing(false); setTimeout(() => setSyncMsg(""), 5000);
+  };
   const add = () => { if (!nn || !na) return setErr("Enter name and address"); setContacts(Contacts.add(nn, na)); setShowAdd(false); setNn(""); setNa(""); setErr(""); };
   return (
     <div className="mp-scroll">
@@ -422,6 +559,10 @@ function MessengerScreen({ onNav }) {
           <button className="mp-btn" onClick={add}>ADD CONTACT</button>
         </div>
       )}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "9px 16px", borderBottom: `2px solid ${T.black}`, background: T.white }}>
+        <span className="mp-lbl-sm">{syncMsg || (chainTs ? `CHAIN SYNC · ${new Date(chainTs * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : "CHAIN SYNC · NOTHING ON CHAIN YET")}</span>
+        <button className="mp-link" onClick={push} disabled={syncing}>{syncing ? "WRITING…" : "PUSH TO CHAIN"}</button>
+      </div>
       {contacts.length === 0 ? (
         <div className="mp-band" style={{ textAlign: "center" }}><div className="mp-quip" style={{ marginBottom: 8 }}>No contacts yet.</div><div className="mp-lbl-sm">TAP + TO START A CONVERSATION</div></div>
       ) : contacts.map((c, i) => (
@@ -562,7 +703,7 @@ function SettingsScreen({ onLogout, onAdmin }) {
         <span className="mp-lbl-sm">SEALING ENCRYPTS YOUR WALLET ON THE SERVER. ONLY YOUR SEED REOPENS IT.</span>
       </div>
       <div style={{ padding: "8px 16px 20px", textAlign: "center" }}>
-        <span onClick={onAdmin} className="mp-lbl-sm" style={{ userSelect: "none", cursor: "default", color: T.black, opacity: .5 }}>ZAIM v0.9.1</span>
+        <span onClick={onAdmin} className="mp-lbl-sm" style={{ userSelect: "none", cursor: "default", color: T.black, opacity: .5 }}>ZAIM v0.9.2</span>
       </div>
     </div>
   );
@@ -602,6 +743,7 @@ export default function ZaimApp() {
     switch (screen) {
       case "home": return <HomeScreen onNav={nav} />;
       case "send": return <SendScreen onBack={() => setScreen("home")} />;
+      case "request": return <RequestScreen onBack={() => setScreen("home")} />;
       case "swap": return <ZaimSwap onBack={() => setScreen("home")} />;
       case "messages": return <MessengerScreen onNav={nav} />;
       case "chat": return chatContact ? <ChatScreen contact={chatContact} onBack={() => setScreen("messages")} /> : null;
@@ -611,7 +753,7 @@ export default function ZaimApp() {
       default: return <HomeScreen onNav={nav} />;
     }
   };
-  const showNav = authed && !["send", "swap", "chat", "admin"].includes(screen);
+  const showNav = authed && !["send", "request", "swap", "chat", "admin"].includes(screen);
   return (
     <div className="mp mp-shell">
       <style>{MAXPAIN_CSS}</style>

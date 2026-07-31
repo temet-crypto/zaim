@@ -1,9 +1,10 @@
 # ZAIM
 
 A dead simple Zcash wallet. Sign in with your seed, hold shielded ZEC, send and
-receive private payments, message over shielded memos, swap in and out of ZEC
-across chains, and leave ZEC drops at physical coordinates with GeoVault. Lives
-at [zaim.info](https://zaim.info).
+receive private payments, message over shielded memos, request payments with
+ZIP 321 links any wallet can pay, sync your contact book to the chain itself as
+encrypted memos, swap in and out of ZEC across chains, and leave ZEC drops at
+physical coordinates with GeoVault. Lives at [zaim.info](https://zaim.info).
 
 ## What it is, honestly
 
@@ -61,6 +62,11 @@ runs *on* is open and decentralized, and every piece is checkable below.
   shielded transaction genuinely does not say who sent it.
 - GeoVault escrow is custodial and the location check trusts device GPS.
   Treat vaults as small value drops, not a settlement layer.
+- Contact sync writes your address book to the chain as encrypted memos to
+  yourself: gzip, then AES-256-GCM under a PBKDF2 key from your own seed,
+  chunked as `zaim-sync:v1:<n>/<total>:<ts>:<b64>` in one transaction. The
+  format is documented in `api/main.py` so any wallet could implement it. No
+  server copy exists.
 - `nginx/zaim-security.conf` has the security headers the live site runs with.
 
 ## License

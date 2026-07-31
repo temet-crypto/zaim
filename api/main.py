@@ -18,7 +18,7 @@ Notes:
     Same seed always lands in the same wallet, from any device, no account row.
 """
 import os, json, time, uuid, hashlib, hmac, secrets, asyncio, subprocess, re
-import tarfile, shutil, io
+import tarfile, shutil, io, base64, gzip
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from typing import Optional
@@ -420,7 +420,7 @@ async def lifespan(app: FastAPI):
     vault_task.cancel()
     escrow_task.cancel()
 
-app = FastAPI(title="ZAIM API", version="0.9.1", lifespan=lifespan)
+app = FastAPI(title="ZAIM API", version="0.9.2", lifespan=lifespan)
 # The SPA is served same-origin (nginx proxies /api), so CORS is belt-and-braces.
 # Restrict to the known origins; Bearer tokens are used (no cookies), so credentials are off.
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
@@ -765,8 +765,8 @@ async def get_messages(session=Depends(get_session)):
             if not memo:
                 continue
             text, from_addr = _split_reply_tag(str(memo))
-            if not text or text.startswith("zaim-vault:"):
-                continue  # vault-funding bookkeeping, not conversation
+            if not text or text.startswith("zaim-vault:") or text.startswith("zaim-sync:"):
+                continue  # vault-funding and contact-sync bookkeeping, not conversation
             messages.append({
                 "memo": text,
                 "from": from_addr,
@@ -781,6 +781,209 @@ async def get_messages(session=Depends(get_session)):
         return {"messages": messages, "count": len(messages)}
     except Exception:
         return {"messages": [], "count": 0}
+
+# ─── Payment requests · ZIP-321 ──────────────────────────────────────────────
+# A request is a fresh diversified z-address plus a zcash: URI any wallet can
+# pay (Zashi, Ywallet, edge — it is an open standard, not a ZAIM thing). Fresh
+# address per request means invoices cannot be linked to each other by the
+# payers. Diversified addresses share one viewing key, so a restore from seed
+# still finds every payment no matter how many were handed out.
+# Requests live in zaim-requests.json INSIDE the wallet dir: they seal and
+# unseal with the wallet and never sit in plaintext at rest.
+
+def _requests_path(wn):
+    return os.path.join(WDIR, wn, "zaim-requests.json")
+
+def _load_requests(wn):
+    try:
+        with open(_requests_path(wn)) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def _save_requests(wn, lst):
+    try:
+        _atomic_write_json(_requests_path(wn), lst)
+    except Exception as e:
+        print(f"[requests] save failed for {wn}: {e}", flush=True)
+
+def _b64url(b):
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+def _zip321_uri(address, zats, memo):
+    # ZIP-321: amount is decimal ZEC, memo is base64url without padding.
+    amount = (Decimal(zats) / Decimal(100_000_000)).quantize(Decimal("0.00000001")).normalize()
+    uri = f"zcash:{address}?amount={amount:f}"
+    if memo:
+        uri += f"&memo={_b64url(memo.encode('utf-8'))}"
+    return uri
+
+class RequestCreateReq(BaseModel):
+    amount: float
+    memo: str = ""
+
+@app.post("/api/request/create")
+async def request_create(req: RequestCreateReq, session=Depends(get_session)):
+    wn = session["wallet_name"]
+    if req.amount is None or req.amount <= 0:
+        raise HTTPException(400, detail="Amount must be positive")
+    zats = int((Decimal(str(req.amount)) * 100_000_000).to_integral_value(rounding=ROUND_DOWN))
+    if zats <= 0:
+        raise HTTPException(400, detail="Amount too small")
+    if req.memo and len(req.memo.encode("utf-8")) > 400:
+        raise HTTPException(400, detail="Keep the note under 400 characters")
+    addr = _addr_from_new_address(await azec(wn, "new_address", ["z"]))
+    if not addr:
+        raise HTTPException(502, detail="Could not derive a fresh address. Try again")
+    await azec(wn, "save")
+    rec = {
+        "id": secrets.token_hex(6), "address": addr, "zats": zats,
+        "zec": zats / 1e8, "memo": req.memo or "",
+        "uri": _zip321_uri(addr, zats, req.memo or ""),
+        "created": time.time(), "paid": False, "txid": "",
+    }
+    lst = [rec] + _load_requests(wn)
+    _save_requests(wn, lst[:50])
+    return {"request": rec}
+
+@app.get("/api/request/list")
+async def request_list(session=Depends(get_session)):
+    """Requests, with paid status refreshed against the wallet's own transfers.
+    Match is by the request's unique address; amount+time is the fallback for
+    CLI versions that do not expose the receiving address."""
+    wn = session["wallet_name"]
+    lst = _load_requests(wn)
+    if any(not r["paid"] for r in lst):
+        try:
+            txs = await azec(wn, "value_transfers")
+            parsed = txs if isinstance(txs, list) else parse_transactions(txs)
+        except Exception:
+            parsed = []
+        changed = False
+        for r in lst:
+            if r["paid"]:
+                continue
+            for t in parsed:
+                if not isinstance(t, dict):
+                    continue
+                kind = str(t.get("kind", "")).lower()
+                if "receiv" not in kind:
+                    continue
+                t_addr = t.get("recipient_address") or t.get("address") or ""
+                try:
+                    val = int(t.get("value", 0))
+                except (TypeError, ValueError):
+                    val = 0
+                addr_hit = t_addr and t_addr == r["address"]
+                amt_hit = not t_addr and val == r["zats"]
+                if addr_hit or amt_hit:
+                    r["paid"] = True
+                    r["txid"] = t.get("txid", "")
+                    changed = True
+                    break
+        if changed:
+            _save_requests(wn, lst)
+    return {"requests": lst}
+
+# ─── Chain sync · the contact book follows the seed ──────────────────────────
+# The address book is the one thing that used to live only in the browser. Now
+# it can ride the chain: gzip the JSON, encrypt it with a key derived from the
+# seed, split the ciphertext across shielded memos, and send them to yourself
+# in ONE transaction (all chunks land or none do). Any device that signs in
+# with the seed pulls the newest complete set. No server copy, no third party,
+# and the format below is the whole spec, so any wallet could implement it.
+#
+#   memo = "zaim-sync:v1:<chunk>/<total>:<unix-ts>:<base64 piece>"
+#   ciphertext = nonce(12) + AES-256-GCM(gzip(json), aad="zaim-sync-v1")
+#   key = PBKDF2-SHA256(normalized seed, salt="zaim-sync-v1:" + wallet-fp, 200k)
+
+SYNC_TAG = "zaim-sync:v1:"
+SYNC_MAX_CHUNKS = 16
+SYNC_CHUNK_RE = re.compile(r"^zaim-sync:v1:(\d+)/(\d+):(\d+):([A-Za-z0-9+/=]+)$")
+
+async def _sync_key(wn):
+    """Derive the sync key from the seed at call time and drop it. The seed is
+    read back from the CLI rather than held in server memory between requests."""
+    seed_text, _ = _parse_recovery(await azec(wn, "recovery_info"))
+    if not seed_text:
+        raise HTTPException(502, detail="Could not read the wallet seed to derive the sync key")
+    norm = normalize_seed(seed_text)
+    return hashlib.pbkdf2_hmac("sha256", norm.encode(), ("zaim-sync-v1:" + wn).encode(), PBKDF2_ITER)
+
+class SyncPushReq(BaseModel):
+    contacts: list
+
+@app.post("/api/sync/push")
+async def sync_push(req: SyncPushReq, session=Depends(get_session)):
+    wn = session["wallet_name"]
+    z = session.get("z_address", "")
+    if not z:
+        z, _, _ = await _read_addresses(wn)
+    if not z:
+        raise HTTPException(400, detail="The wallet has no shielded address yet")
+    payload = json.dumps({"contacts": req.contacts[:500]}, separators=(",", ":")).encode()
+    key = await _sync_key(wn)
+    nonce = secrets.token_bytes(12)
+    blob = nonce + AESGCM(key).encrypt(nonce, gzip.compress(payload), b"zaim-sync-v1")
+    b64 = base64.b64encode(blob).decode()
+    ts = int(time.time())
+    room = MEMO_BYTES_MAX - len(f"{SYNC_TAG}{SYNC_MAX_CHUNKS}/{SYNC_MAX_CHUNKS}:{ts}:")
+    pieces = [b64[i:i + room] for i in range(0, len(b64), room)]
+    if len(pieces) > SYNC_MAX_CHUNKS:
+        raise HTTPException(400, detail=f"The contact book is too large to sync ({len(pieces)} chunks, max {SYNC_MAX_CHUNKS})")
+    outputs = [{"address": z, "amount": DUST,
+                "memo": f"{SYNC_TAG}{i + 1}/{len(pieces)}:{ts}:{p}"}
+               for i, p in enumerate(pieces)]
+    result = await azec(wn, "quicksend", [json.dumps(outputs)])
+    await azec(wn, "save")
+    wallet_cache.pop(wn, None)
+    txid = _extract_txid(result)
+    if not txid:
+        raw = json.dumps(result, default=str).lower()
+        if "insufficient" in raw or "not enough" in raw or "no funds" in raw:
+            raise HTTPException(400, detail="Not enough ZEC to write the sync. It costs about "
+                                            f"{(len(pieces) * DUST) / 1e8:.4f} ZEC plus the network fee")
+        raise HTTPException(502, detail="The sync did not broadcast. Nothing left your wallet")
+    return {"txid": txid, "chunks": len(pieces), "ts": ts,
+            "cost_zec": (len(pieces) * DUST) / 1e8}
+
+@app.get("/api/sync/pull")
+async def sync_pull(session=Depends(get_session)):
+    """Newest complete sync set from the wallet's own memos. Free: reading your
+    own chain data costs nothing."""
+    wn = session["wallet_name"]
+    try:
+        txs = await azec(wn, "value_transfers")
+        parsed = txs if isinstance(txs, list) else parse_transactions(txs)
+    except Exception:
+        return {"found": False}
+    sets = {}
+    for t in parsed:
+        if not isinstance(t, dict):
+            continue
+        memos = t.get("memos") if isinstance(t.get("memos"), list) else []
+        if t.get("memo"):
+            memos = memos + [t["memo"]]
+        for m in memos:
+            g = SYNC_CHUNK_RE.match(str(m).strip())
+            if not g:
+                continue
+            n, total, ts = int(g.group(1)), int(g.group(2)), int(g.group(3))
+            sets.setdefault(ts, {"total": total, "parts": {}})["parts"][n] = g.group(4)
+    key = None
+    for ts in sorted(sets, reverse=True):
+        s = sets[ts]
+        if len(s["parts"]) != s["total"]:
+            continue
+        try:
+            if key is None:
+                key = await _sync_key(wn)
+            blob = base64.b64decode("".join(s["parts"][i] for i in range(1, s["total"] + 1)))
+            data = json.loads(gzip.decompress(AESGCM(key).decrypt(blob[:12], blob[12:], b"zaim-sync-v1")))
+            return {"found": True, "ts": ts, "contacts": data.get("contacts", [])}
+        except Exception:
+            continue  # damaged or foreign set; try the next newest
+    return {"found": False}
 
 @app.get("/api/wallet/transactions")
 async def get_transactions(session=Depends(get_session)):
