@@ -1,0 +1,24 @@
+# ZAIM Tor config.
+#
+# Two jobs, deliberately separate:
+#   1. A v3 onion service so someone can reach ZAIM without their request
+#      crossing the clearnet, without DNS, and without us or their network
+#      learning their address.
+#   2. A SOCKS port on the compose network, so the API can optionally send
+#      lightwalletd traffic through Tor. Off by default on the API side.
+
+# Reachable only on the compose network. This port is never published to the
+# host, so nothing outside the docker network can use it as an open proxy.
+SocksPort 0.0.0.0:9050
+SocksPolicy accept 172.16.0.0/12
+SocksPolicy accept 192.168.0.0/16
+SocksPolicy reject *
+
+# Persisted on a named volume, so the .onion address survives a rebuild.
+HiddenServiceDir /var/lib/tor/zaim
+HiddenServiceVersion 3
+HiddenServicePort 80 zaim-web:80
+
+# We are a client and a service, never a relay.
+ClientOnly 1
+Log notice stdout

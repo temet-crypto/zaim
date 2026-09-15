@@ -1,0 +1,11 @@
+# Tor for ZAIM. Built from Alpine's own package rather than pulling a
+# third-party tor image: this box holds wallet keys, so every image in the
+# compose file should be one whose provenance is obvious.
+FROM alpine:3.20
+RUN apk add --no-cache tor
+COPY tor/torrc /etc/tor/torrc
+# The hidden service key lives on a named volume, not in the image. Tor refuses
+# to start unless that directory is 0700 and owned by the tor user.
+RUN mkdir -p /var/lib/tor && chown -R tor:tor /var/lib/tor && chmod 700 /var/lib/tor
+USER tor
+CMD ["tor", "-f", "/etc/tor/torrc"]

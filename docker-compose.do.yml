@@ -1,0 +1,60 @@
+# ZAIM on DigitalOcean.
+# Differences from docker-compose-light.yml, all deliberate:
+#   - wallets are a BIND MOUNT of ./wallets, not an anonymous named volume, so
+#     the wallet state recovered from EC2 is the state the API actually uses.
+#   - port 8000 is NOT published; nginx reaches the API over the compose
+#     network instead, so the wallet API is never exposed to the internet.
+services:
+  zaim-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: zaim-zingo-api:latest
+    container_name: zaim-api
+    restart: unless-stopped
+    environment:
+      - LIGHTWALLETD_SERVER=https://zec.rocks:443
+      - WALLET_DIR=/app/wallets
+      - ZECWALLET_CLI=/app/zingo-cli
+      - ZAIM_CLI=/app/zingo-cli
+    # A core dump of this process would contain seeds and spending keys in
+    # plaintext. Hard zero, so nothing can raise it back at runtime.
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+    volumes:
+      - ./wallets:/app/wallets
+      - ./zcash-data:/app/zcash-data
+    networks: [zaim-net]
+
+  zaim-web:
+    image: nginx:alpine
+    container_name: zaim-web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./dist:/usr/share/nginx/html:ro
+      - ./nginx/zaim-api.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on: [zaim-api]
+    networks: [zaim-net]
+
+  zaim-tor:
+    build:
+      context: .
+      dockerfile: Dockerfile.tor
+    image: zaim-tor:latest
+    container_name: zaim-tor
+    restart: unless-stopped
+    volumes:
+      - tor-data:/var/lib/tor
+    networks: [zaim-net]
+
+networks:
+  zaim-net:
+
+volumes:
+  tor-data:

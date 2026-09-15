@@ -17,7 +17,7 @@ Notes:
   - Wallet identity = fingerprint of the normalized seed (sha256, 16 hex chars).
     Same seed always lands in the same wallet, from any device, no account row.
 """
-import os, json, time, uuid, hashlib, hmac, secrets, asyncio, subprocess, re
+import os, json, time, uuid, hashlib, hmac, secrets, asyncio, subprocess, re, socket
 import tarfile, shutil, io, base64, gzip
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
@@ -40,6 +40,38 @@ ALLOWED_ORIGINS = [o.strip() for o in os.getenv(
 ).split(",") if o.strip()]
 DUST = 10000
 PBKDF2_ITER = 200_000
+
+# ── Sign-in throttling ────────────────────────────────────────────────────────
+# The seed endpoints are unauthenticated and expensive. A seed that matches no
+# cached wallet starts a FRESH restore, which can hold a zingo-cli process for
+# the full 600s timeout and write a wallet dir to disk. On a one-core box that
+# makes /api/wallet/open a resource-exhaustion lever long before it is a
+# brute-force target, so the concurrency cap below matters more than the counter.
+SIGNIN_MAX_PER_IP = int(os.getenv("ZAIM_SIGNIN_MAX_PER_IP", "8"))
+SIGNIN_WINDOW_SEC = int(os.getenv("ZAIM_SIGNIN_WINDOW_MIN", "15")) * 60
+MAX_CONCURRENT_RESTORES = int(os.getenv("ZAIM_MAX_RESTORES", "2"))
+
+signin_hits = {}   # ip -> [timestamps], trimmed to the window on each touch
+
+def client_ip(request):
+    """nginx sets both of these; fall back to the socket for direct hits."""
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.headers.get("X-Real-IP") or (request.client.host if request.client else "?")
+
+def throttle_signin(request):
+    ip = client_ip(request)
+    now = time.time()
+    hits = [t for t in signin_hits.get(ip, []) if now - t < SIGNIN_WINDOW_SEC]
+    if len(hits) >= SIGNIN_MAX_PER_IP:
+        mins = int((SIGNIN_WINDOW_SEC - (now - hits[0])) // 60) + 1
+        raise HTTPException(429, detail=f"Too many sign-in attempts. Try again in {mins} minutes")
+    hits.append(now)
+    signin_hits[ip] = hits
+    if len(signin_hits) > 5000:                     # bound the table
+        for k in [k for k, v in signin_hits.items() if not v or now - v[-1] > SIGNIN_WINDOW_SEC]:
+            signin_hits.pop(k, None)
 
 # ── App fee ───────────────────────────────────────────────────────────────────
 # On each payment, a cut is routed to FEE_ADDRESS as a second output of the same
@@ -176,6 +208,74 @@ def load_sessions():
     except Exception:
         pass
 
+# ── Indexer selection ─────────────────────────────────────────────────────────
+# Which lightwalletd a wallet uses is a privacy decision, though not the one it
+# looks like: the browser never contacts the indexer, zingo-cli does, so the
+# indexer sees THIS BOX's address and every user is mixed behind it. What it can
+# still build is a picture of everything ZAIM looks up and broadcasts.
+#
+# Reachability checked 2026-09-14. Be honest about what this list is: every entry
+# is operated by zec.rocks, so choosing between them changes latency, not who can
+# watch you. Pointing at your own node is the only real fix, which is what
+# ZAIM_ALLOW_ANY_SERVER=1 is for when you self-host.
+DEFAULT_SERVERS = [
+    ("https://zec.rocks:443",    "zec.rocks, global"),
+    ("https://na.zec.rocks:443", "zec.rocks, North America"),
+    ("https://eu.zec.rocks:443", "zec.rocks, Europe"),
+    ("https://sa.zec.rocks:443", "zec.rocks, South America"),
+]
+ALLOWED_SERVERS = [s.strip() for s in os.getenv(
+    "ZAIM_SERVERS", ",".join(u for u, _ in DEFAULT_SERVERS)).split(",") if s.strip()]
+# Off by default: an open field here turns this box into an outbound proxy for
+# whatever host a caller names.
+ALLOW_ANY_SERVER = os.getenv("ZAIM_ALLOW_ANY_SERVER", "") == "1"
+SERVERS_FILE = os.path.join(WDIR, "_servers.json")
+wallet_servers = {}   # wallet_name -> indexer url, survives restarts
+
+def save_wallet_servers():
+    try:
+        _atomic_write_json(SERVERS_FILE, wallet_servers)
+    except Exception as e:
+        print(f"[save_wallet_servers] {e}", flush=True)
+
+def load_wallet_servers():
+    global wallet_servers
+    try:
+        if os.path.exists(SERVERS_FILE):
+            with open(SERVERS_FILE) as f:
+                wallet_servers = json.load(f)
+    except Exception:
+        wallet_servers = {}
+
+def wallet_server(wallet_name):
+    return wallet_servers.get(wallet_name) or SERVER
+
+def validate_server(url):
+    """Empty means 'use the instance default'. Anything else must be https and,
+    unless this instance opted out, on the allowlist."""
+    url = (url or "").strip()
+    if not url:
+        return SERVER
+    if not url.startswith("https://"):
+        raise HTTPException(400, detail="The indexer address must start with https://")
+    if not ALLOW_ANY_SERVER and url not in ALLOWED_SERVERS:
+        raise HTTPException(400, detail="That indexer is not on this instance's allowlist")
+    return url
+
+# ── Optional Tor egress ───────────────────────────────────────────────────────
+# ZAIM_TOR_SOCKS=host:port pushes every zingo-cli call through Tor via torsocks
+# (LD_PRELOAD, which works because zingo-cli is dynamically linked against
+# glibc). What it buys is narrow but real: the indexer stops seeing one stable
+# ZAIM address behind every query it answers. What it costs is latency on a sync
+# that already runs close to its timeout on a one core box, so it stays off
+# until someone has measured a restore with it on.
+TOR_SOCKS = os.getenv("ZAIM_TOR_SOCKS", "").strip()
+if TOR_SOCKS:
+    print(f"[tor] zingo-cli egress routed through {TOR_SOCKS}", flush=True)
+
+def cli_prefix():
+    return ["torsocks"] if TOR_SOCKS else []
+
 def wallet_env(wallet_name):
     """Per-wallet isolation: zingo-cli takes an explicit --data-dir, so every
     wallet lives in its own directory (zingo-wallet.dat and logs inside)."""
@@ -183,6 +283,18 @@ def wallet_env(wallet_name):
     os.makedirs(wdir, exist_ok=True)
     env = dict(os.environ)
     env["HOME"] = wdir
+    if TOR_SOCKS:
+        host, _, port = TOR_SOCKS.partition(":")
+        # torsocks parses TorAddress itself and rejects anything that is not a
+        # literal IP, so a compose service name has to be resolved here. Done per
+        # call rather than once at boot: the tor container can come back on a new
+        # address, and a stale IP would silently send traffic nowhere.
+        try:
+            host = socket.gethostbyname(host)
+        except OSError as e:
+            print(f"[tor] cannot resolve {host}: {e}", flush=True)
+        env["TORSOCKS_TOR_ADDRESS"] = host
+        env["TORSOCKS_TOR_PORT"] = port or "9050"
     return wdir, env
 
 _CLI_NOISE = ("Launching ", "Save task", "Zingo CLI quit", "Creating a new wallet")
@@ -192,9 +304,20 @@ def _clean_cli_output(out):
              if l.strip() and not any(l.strip().startswith(p) for p in _CLI_NOISE)]
     return "\n".join(lines).strip()
 
+# A seed is 12 to 24 lowercase words. Anything that shape, in text on its way to
+# a client, is treated as key material and never sent.
+_SEED_SHAPE = re.compile(r"\b[a-z]+(?: [a-z]+){11,32}\b")
+
+def _safe_cli_error(text):
+    """Sanitize CLI output before it can reach a client: drop seed-shaped runs and
+    absolute paths (which leak the wallet fingerprint and the server layout)."""
+    t = _SEED_SHAPE.sub("[redacted]", text or "")
+    t = re.sub(r"(/[\w.\-]+){2,}", "[path]", t)
+    return t.strip()[:200] or "CLI error"
+
 def zec(wallet_name, command, args=None):
     wdir, env = wallet_env(wallet_name)
-    cmd = [CLI, "--server", SERVER, "--data-dir", wdir, command]
+    cmd = cli_prefix() + [CLI, "--server", wallet_server(wallet_name), "--data-dir", wdir, command]
     if args:
         cmd.extend([str(a) for a in args])
     try:
@@ -202,7 +325,8 @@ def zec(wallet_name, command, args=None):
         out = _clean_cli_output(r.stdout.strip())
         if r.returncode != 0:
             err = r.stderr.strip() or out
-            raise HTTPException(500, detail="CLI error: " + err)
+            print(f"[zec] {wallet_name} {command} rc={r.returncode}: {err[:400]}", flush=True)
+            raise HTTPException(500, detail="CLI error: " + _safe_cli_error(err))
         try:
             return json.loads(out)
         except json.JSONDecodeError:
@@ -213,6 +337,14 @@ def zec(wallet_name, command, args=None):
         raise HTTPException(503, detail="CLI not found")
 
 wallet_locks = {}
+_restore_sem = None
+
+def restore_sem():
+    """Created lazily so it binds to the running loop, like the wallet locks."""
+    global _restore_sem
+    if _restore_sem is None:
+        _restore_sem = asyncio.Semaphore(MAX_CONCURRENT_RESTORES)
+    return _restore_sem
 
 def _wlock(wn):
     if wn not in wallet_locks:
@@ -406,6 +538,7 @@ async def lifespan(app: FastAPI):
     load_sessions()
     load_swaps()
     load_vaults()
+    load_wallet_servers()
     sync_task = asyncio.create_task(periodic_sync())
     startup_task = asyncio.create_task(startup_sync())
     price_task = asyncio.create_task(periodic_price())
@@ -428,6 +561,10 @@ app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credenti
 class OpenReq(BaseModel):
     seed_phrase: str
     birthday: int = 0
+    server: str = ""      # optional indexer choice, remembered for this wallet
+
+class ServerReq(BaseModel):
+    server: str
 
 class SendReq(BaseModel):
     to_address: str
@@ -570,9 +707,10 @@ def _new_session(wn, z_addr, t_addr, ua_addr):
     return token
 
 @app.post("/api/wallet/create")
-async def create_wallet():
+async def create_wallet(request: Request):
     """Make a brand new wallet. Returns the seed exactly once. The seed IS the
     account: fingerprint names the wallet dir, seed derives the sealing key."""
+    throttle_signin(request)   # unauthenticated and it writes a wallet dir per call
     tmp_wn = "new_" + secrets.token_hex(8)
     await azec(tmp_wn, "sync", ["run"])
     await asyncio.sleep(3)
@@ -602,13 +740,21 @@ async def create_wallet():
     }
 
 @app.post("/api/wallet/open")
-async def open_wallet(req: OpenReq):
+async def open_wallet(req: OpenReq, request: Request):
     """Sign in with a seed. Unseals the cached wallet if we have it, otherwise
     restores from the chain. Same seed, same wallet, any device."""
+    throttle_signin(request)
     norm = normalize_seed(req.seed_phrase)
     fp = seed_fingerprint(norm)
     wn = "zw_" + fp
     key = seed_key(norm, fp)
+    # Validate before the seed touches anything, and remember the choice so the
+    # next sign-in from any device lands on the same indexer.
+    if req.server:
+        chosen = validate_server(req.server)
+        if wallet_servers.get(wn) != chosen:
+            wallet_servers[wn] = chosen
+            save_wallet_servers()
     wdir, sealed = _wallet_paths(wn)
     loop = asyncio.get_event_loop()
     restored = False
@@ -618,16 +764,25 @@ async def open_wallet(req: OpenReq):
         else:
             # Fresh restore from seed. The seed goes to the CLI process only.
             _, env = wallet_env(wn)
-            restore_cmd = [CLI, "--server", SERVER, "--data-dir", wdir, "--seed", norm]
+            restore_cmd = cli_prefix() + [CLI, "--server", wallet_server(wn), "--data-dir", wdir, "--seed", norm]
             if req.birthday > 0:
                 restore_cmd += ["--birthday", str(req.birthday)]
             restore_cmd += ["sync", "run"]
             try:
-                r = await loop.run_in_executor(None, lambda: subprocess.run(
-                    restore_cmd, capture_output=True, text=True, timeout=600, env=env))
+                # Cap concurrent restores: each one is a full chain sync, and the
+                # box has one core. Without this, a handful of unknown seeds is
+                # enough to starve every signed-in user.
+                if restore_sem().locked() and MAX_CONCURRENT_RESTORES > 0:
+                    print(f"[restore] queueing {wn}, {MAX_CONCURRENT_RESTORES} already running", flush=True)
+                async with restore_sem():
+                    r = await loop.run_in_executor(None, lambda: subprocess.run(
+                        restore_cmd, capture_output=True, text=True, timeout=600, env=env))
                 if r.returncode != 0 and "error" in (r.stderr + r.stdout).lower():
                     shutil.rmtree(wdir, ignore_errors=True)
-                    raise HTTPException(500, detail="Restore failed: " + (r.stderr or r.stdout)[:160])
+                    # Never echo CLI output here: the seed is in this process's
+                    # argv, so anything it prints is potential seed material.
+                    print(f"[restore] failed rc={r.returncode} for {wn}", flush=True)
+                    raise HTTPException(500, detail="Restore failed. Check the seed phrase and birthday, then try again")
             except subprocess.TimeoutExpired:
                 pass  # long rescan; wallet exists, sync continues in the background
             restored = True
@@ -1012,6 +1167,37 @@ async def get_seed(session=Depends(get_session)):
 @app.get("/api/node/info")
 async def node_info():
     return {"server": SERVER, "backend": "zingo-cli (zingolib)", "synced": True}
+
+@app.get("/api/servers")
+async def list_servers():
+    """The indexers this instance will talk to. `same_operator` is the honest
+    caveat: a picker that only offers one operator is not decentralization."""
+    labels = dict(DEFAULT_SERVERS)
+    return {
+        "servers": [{"url": u, "label": labels.get(u, u)} for u in ALLOWED_SERVERS],
+        "default": SERVER,
+        "any_allowed": ALLOW_ANY_SERVER,
+        "same_operator": len({u.split("//")[-1].split(":")[0].split(".")[-2:][0]
+                              for u in ALLOWED_SERVERS}) <= 1,
+    }
+
+@app.get("/api/settings/server")
+async def get_wallet_server(session=Depends(get_session)):
+    wn = session["wallet_name"]
+    return {"server": wallet_server(wn), "is_default": wn not in wallet_servers}
+
+@app.post("/api/settings/server")
+async def set_wallet_server(req: ServerReq, session=Depends(get_session)):
+    """Repoint this wallet at another indexer. Takes effect on the next CLI call;
+    nothing about the wallet itself changes, only who it asks for chain data."""
+    wn = session["wallet_name"]
+    chosen = validate_server(req.server)
+    if req.server.strip():
+        wallet_servers[wn] = chosen
+    else:
+        wallet_servers.pop(wn, None)
+    save_wallet_servers()
+    return {"server": wallet_server(wn), "is_default": wn not in wallet_servers}
 
 @app.get("/api/price")
 async def get_price():
@@ -1950,9 +2136,15 @@ async def admin_sessions(admin=Depends(get_admin)):
     return {"sessions": out}
 
 @app.get("/api/admin/escrow")
-async def admin_escrow(admin=Depends(get_admin), reveal_seed: bool = False):
-    """Escrow health and, on request, its seed. That seed is the ONLY way to
-    recover vault funds if this box dies, so back it up somewhere off the box."""
+async def admin_escrow(admin=Depends(get_admin)):
+    """Escrow health. The seed is deliberately NOT served here: it is the only
+    way to recover vault funds, and a header token is too thin a gate for it.
+    Read it on the box instead, where it never crosses the network:
+
+        docker exec -it zaim-api /app/zingo-cli \\
+            --offline --data-dir /app/wallets/_escrow recovery_info
+
+    Do that once, write it down offline, and never run it again."""
     await ensure_escrow()
     bal = {}
     try:
@@ -1965,16 +2157,8 @@ async def admin_escrow(admin=Depends(get_admin), reveal_seed: bool = False):
         by_status[v["status"]] = by_status.get(v["status"], 0) + 1
         if v["status"] in ("armed", "claiming", "refunding", "review"):
             owed += v["zats"]
-    out = {"address": _escrow_pay_addr(), "balance": bal, "vaults": by_status,
-           "owed_zats": owed, "owed_zec": owed / 1e8}
-    if reveal_seed:
-        try:
-            seed_text, birthday = _parse_recovery(await azec(ESCROW_WN, "recovery_info"))
-            out["seed"] = seed_text
-            out["birthday"] = birthday
-        except Exception as e:
-            out["seed_error"] = str(e)[:120]
-    return out
+    return {"address": _escrow_pay_addr(), "balance": bal, "vaults": by_status,
+            "owed_zats": owed, "owed_zec": owed / 1e8}
 
 @app.post("/api/admin/seal_all")
 async def admin_seal_all(admin=Depends(get_admin)):

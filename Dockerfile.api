@@ -4,6 +4,10 @@ WORKDIR /app
 # placed in the build context as ./zingo-cli. No network fetch at image build.
 COPY zingo-cli /app/zingo-cli
 RUN chmod +x /app/zingo-cli
+# torsocks is here so ZAIM_TOR_SOCKS can be switched on without rebuilding.
+# It does nothing unless that variable is set.
+RUN apt-get update && apt-get install -y --no-install-recommends torsocks \
+    && rm -rf /var/lib/apt/lists/*
 COPY api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY api/ ./api/

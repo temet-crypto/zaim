@@ -193,6 +193,20 @@ const SeedVisual = () => (
   </div>
 );
 
+// A plain claim in the honest section. No visual, no sample data: the point is
+// that these read as statements the project is willing to be held to.
+function Claim({ n, head, children }) {
+  return (
+    <div style={{ padding: "13px 16px", background: T.white, borderBottom: `2px solid ${T.black}` }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+        <span style={{ fontFamily: F.mono, fontSize: 10, letterSpacing: 1.5, color: T.blue }}>{n}</span>
+        <span style={{ fontFamily: F.display, fontWeight: 800, fontSize: 15, letterSpacing: -.2 }}>{head}</span>
+      </div>
+      <div style={{ fontFamily: F.body, fontSize: 13, lineHeight: 1.55, marginTop: 6 }}>{children}</div>
+    </div>
+  );
+}
+
 // ── screen ───────────────────────────────────────────────────────────────────
 export default function FeaturesScreen({ onBack }) {
   return (
@@ -251,8 +265,23 @@ export default function FeaturesScreen({ onBack }) {
 
       <div className="mp-section">THE HONEST PART</div>
       <div className="mp-band mp-band-w">
-        <div className="mp-quip">Your wallet lives on our server while you are signed in, and it is sealed the moment you sign out. Your seed is a standard Zcash seed, so it opens the same wallet in Zashi or Ywallet whenever you want to leave.</div>
+        <div className="mp-quip">Read this before you put real money in. It is the part most wallets bury.</div>
       </div>
+      <Claim n="01" head="You type your seed into our server">
+        The wallet engine runs here, not in your browser. Signing in sends us your seed phrase over TLS, and we need it to build the wallet.
+      </Claim>
+      <Claim n="02" head="While you are signed in, this server can spend">
+        Your keys sit in our memory for as long as your session is open. Anyone who takes control of this machine during that window can move your funds. Treat ZAIM as a hot wallet.
+      </Claim>
+      <Claim n="03" head="Sealed means sealed">
+        When you sign out, or after 30 idle minutes, your wallet is encrypted with a key derived from your own seed and the plaintext is deleted. We cannot open a sealed wallet. Neither can anyone who steals the disk.
+      </Claim>
+      <Claim n="04" head="You can leave whenever you want">
+        Your seed is a standard Zcash seed. Type it into Zashi, Ywallet or any other Zcash wallet and you get the same funds and the same history. Nothing here is locked to us.
+      </Claim>
+      <Claim n="05" head="If you want none of the above">
+        Run ZAIM yourself. The whole thing is public and MIT licensed, and self hosting is documented in the repo, so the only server holding your seed is one you control.
+      </Claim>
 
       <div style={{ padding: 16 }}>
         <button className="mp-btn" onClick={onBack}>BACK TO SIGN IN</button>

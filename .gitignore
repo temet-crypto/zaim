@@ -10,3 +10,7 @@ zingo-cli
 __pycache__/
 *.pyc
 *.pem
+
+# local tooling, never publish
+.claude/
+scripts/ai-review/

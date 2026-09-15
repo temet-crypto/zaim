@@ -36,6 +36,9 @@ const API = {
   listRequests: () => API.get("/request/list"),
   syncPush: (contacts) => API.post("/sync/push", { contacts }),
   syncPull: () => API.get("/sync/pull"),
+  listServers: () => API.get("/servers"),
+  getServer: () => API.get("/settings/server"),
+  setServer: (server) => API.post("/settings/server", { server }),
 };
 
 // ZIP-321 parser for the Send screen: paste a zcash: link from any wallet and
@@ -650,7 +653,25 @@ function SettingsScreen({ onLogout, onAdmin }) {
   const [health, setHealth] = useState(null);
   const [seed, setSeed] = useState(null); const [showSeed, setShowSeed] = useState(false);
   const [seedLoading, setSeedLoading] = useState(false); const [toast, setToast] = useState("");
+  const [servers, setServers] = useState(null); const [mine, setMine] = useState("");
+  const [switching, setSwitching] = useState("");
   useEffect(() => { API.health().then(setHealth).catch(() => { }); }, []);
+  useEffect(() => {
+    API.listServers().then(setServers).catch(() => { });
+    API.getServer().then(r => setMine(r.server)).catch(() => { });
+  }, []);
+  const pickServer = async (url) => {
+    if (url === mine || switching) return;
+    setSwitching(url);
+    try {
+      const r = await API.setServer(url);
+      setMine(r.server);
+      API.health().then(setHealth).catch(() => { });
+    } catch (e) {
+      setToast(e.message || "Could not change indexer"); setTimeout(() => setToast(""), 2500);
+    }
+    setSwitching("");
+  };
   const revealSeed = async () => {
     if (seed) { setShowSeed(!showSeed); return; }
     setSeedLoading(true);
@@ -660,7 +681,6 @@ function SettingsScreen({ onLogout, onAdmin }) {
   };
   const getSeedText = () => { if (!seed) return ""; if (typeof seed === "string") return seed; if (seed.seed) return seed.seed; if (seed.raw) return seed.raw; return JSON.stringify(seed); };
   const conn = health?.status === "ok";
-  const srv = health?.server ? health.server.replace("https://", "").replace("http://", "").split(":")[0] : "···";
   const KV = ({ k, v, color }) => (<div className="mp-kv"><span className="mp-kv-key">{k}</span><span className="mp-kv-val" style={{ color: color || T.black }}>{v}</span></div>);
   const KVm = ({ k, v, color }) => (<div className="mp-kv"><span className="mp-kv-key">{k}</span><span className="mp-kv-val mono" style={{ color: color || T.black }}>{v}</span></div>);
   return (
@@ -669,9 +689,40 @@ function SettingsScreen({ onLogout, onAdmin }) {
       <ScreenHead title="Settings" meta="ZAIM" />
       <div className="mp-section">NETWORK</div>
       <KV k="Status" v={conn ? "ONLINE" : "OFFLINE"} color={conn ? T.teal : T.red} />
-      <KVm k="Server" v={srv} />
       <KVm k="Protocol" v="Shielded · Sapling + Orchard" color={T.blue} />
       <KVm k="Network" v="Zcash Mainnet" />
+
+      <div className="mp-section">INDEXER</div>
+      <div style={{ padding: "10px 16px 4px", fontFamily: F.body, fontSize: 12, lineHeight: 1.5 }}>
+        This is the server ZAIM asks for chain data on your behalf. Your browser never
+        contacts it, so it learns this server's address and not yours. What it does see
+        is every lookup and every broadcast ZAIM makes, so it is worth choosing.
+      </div>
+      {(servers?.servers || []).map(s => {
+        const on = s.url === mine;
+        return (
+          <button key={s.url} onClick={() => pickServer(s.url)} disabled={!!switching}
+            style={{
+              display: "block", width: "100%", textAlign: "left", cursor: switching ? "wait" : "pointer",
+              background: on ? T.blue : T.white, color: on ? T.white : T.black,
+              border: "none", borderBottom: `2px solid ${T.black}`, padding: "11px 16px",
+            }}>
+            <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 14, letterSpacing: -.2 }}>
+              {s.label}{on ? "  IN USE" : ""}
+            </div>
+            <div style={{ fontFamily: F.mono, fontSize: 10, marginTop: 3, opacity: .75 }}>
+              {s.url.replace("https://", "")}
+            </div>
+          </button>
+        );
+      })}
+      {servers?.same_operator && (
+        <div style={{ padding: "10px 16px", fontFamily: F.body, fontSize: 12, lineHeight: 1.5, background: T.off, borderBottom: `2px solid ${T.black}` }}>
+          Worth saying plainly: every option above is run by the same operator, so
+          switching changes your latency and not who can watch you. Running your own
+          indexer is the only version of this that is real.
+        </div>
+      )}
       <div className="mp-section">SECURITY</div>
       <KV k="Encryption" v="E2E SHIELDED" color={T.teal} />
       <KVm k="Key Storage" v="Server side · custodial" />
