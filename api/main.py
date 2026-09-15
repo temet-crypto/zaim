@@ -173,7 +173,7 @@ async def periodic_seal():
                 wdir = os.path.join(WDIR, entry)
                 # Only seed-fingerprint wallets participate in sealing; legacy
                 # password-era dirs (zaim_*) stay untouched until removed.
-                if not os.path.isdir(wdir) or not entry.startswith("zw_"):
+                if not os.path.isdir(wdir) or not entry.startswith(("zw_", "zai_")):
                     continue
                 last = wallet_activity.get(entry, 0)
                 if now - last > IDLE_SEAL_SEC:
@@ -357,7 +357,7 @@ async def azec(wn, cmd, args=None):
     a plaintext dir right after sealing (the CLI makes a FRESH wallet in any
     empty HOME it is pointed at)."""
     async with _wlock(wn):
-        if wn.startswith("zw_") and not os.path.isdir(os.path.join(WDIR, wn)):
+        if wn.startswith(("zw_", "zai_")) and not os.path.isdir(os.path.join(WDIR, wn)):
             raise HTTPException(409, detail="wallet is sealed")
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, zec, wn, cmd, args)
@@ -739,22 +739,9 @@ async def create_wallet(request: Request):
         "message": "Wallet created. Save the seed, it is the only way in.",
     }
 
-@app.post("/api/wallet/open")
-async def open_wallet(req: OpenReq, request: Request):
-    """Sign in with a seed. Unseals the cached wallet if we have it, otherwise
-    restores from the chain. Same seed, same wallet, any device."""
-    throttle_signin(request)
-    norm = normalize_seed(req.seed_phrase)
-    fp = seed_fingerprint(norm)
-    wn = "zw_" + fp
-    key = seed_key(norm, fp)
-    # Validate before the seed touches anything, and remember the choice so the
-    # next sign-in from any device lands on the same indexer.
-    if req.server:
-        chosen = validate_server(req.server)
-        if wallet_servers.get(wn) != chosen:
-            wallet_servers[wn] = chosen
-            save_wallet_servers()
+async def _ensure_wallet_open(norm, wn, key, birthday=0):
+    """Unseal a cached wallet or restore it from the chain. Shared by the main
+    sign-in and the AI account, which is just a second sealed wallet."""
     wdir, sealed = _wallet_paths(wn)
     loop = asyncio.get_event_loop()
     restored = False
@@ -765,8 +752,8 @@ async def open_wallet(req: OpenReq, request: Request):
             # Fresh restore from seed. The seed goes to the CLI process only.
             _, env = wallet_env(wn)
             restore_cmd = cli_prefix() + [CLI, "--server", wallet_server(wn), "--data-dir", wdir, "--seed", norm]
-            if req.birthday > 0:
-                restore_cmd += ["--birthday", str(req.birthday)]
+            if birthday > 0:
+                restore_cmd += ["--birthday", str(birthday)]
             restore_cmd += ["sync", "run"]
             try:
                 # Cap concurrent restores: each one is a full chain sync, and the
@@ -791,6 +778,25 @@ async def open_wallet(req: OpenReq, request: Request):
         await azec(wn, "save")
     except Exception:
         pass
+    return restored
+
+@app.post("/api/wallet/open")
+async def open_wallet(req: OpenReq, request: Request):
+    """Sign in with a seed. Unseals the cached wallet if we have it, otherwise
+    restores from the chain. Same seed, same wallet, any device."""
+    throttle_signin(request)
+    norm = normalize_seed(req.seed_phrase)
+    fp = seed_fingerprint(norm)
+    wn = "zw_" + fp
+    key = seed_key(norm, fp)
+    # Validate before the seed touches anything, and remember the choice so the
+    # next sign-in from any device lands on the same indexer.
+    if req.server:
+        chosen = validate_server(req.server)
+        if wallet_servers.get(wn) != chosen:
+            wallet_servers[wn] = chosen
+            save_wallet_servers()
+    restored = await _ensure_wallet_open(norm, wn, key, req.birthday)
     z_addr, t_addr, ua_addr = await _read_addresses(wn)
     token = _new_session(wn, z_addr, t_addr, ua_addr)
     asyncio.create_task(sync_and_cache(wn))
@@ -1167,6 +1173,174 @@ async def get_seed(session=Depends(get_session)):
 @app.get("/api/node/info")
 async def node_info():
     return {"server": SERVER, "backend": "zingo-cli (zingolib)", "synced": True}
+
+# ── AI tab ────────────────────────────────────────────────────────────────────
+# The server's role here is deliberately dumb: open a second sealed wallet
+# (seed derived CLIENT-side from the main seed — see src/ai/derive.js), move
+# funds into it, forward opaque base64 memo chunks, and hand ciphertext back.
+# Question plaintext is sealed to the relay's X25519 key in the browser and
+# answers are sealed to a browser-held ephemeral key, so this process never
+# sees either. What it does see, and the UI says so: that this account used
+# the AI tab, when, and what it paid.
+
+AI_RELAY_ADDRESS = os.getenv("AI_RELAY_ADDRESS", "")          # unset = mock mode, /api/ai/send disabled
+AI_RELAY_PUBKEY = os.getenv("AI_RELAY_PUBKEY", "")            # relay X25519, hex, served to the client
+AI_REPLY_COST_ZATS = int(os.getenv("AI_REPLY_COST_ZATS", "40000"))   # 8 padded actions
+AI_SEND_COST_ZATS = int(os.getenv("AI_SEND_COST_ZATS", "10000"))     # user's own tx fee, shown not charged
+AI_INFERENCE_USD = float(os.getenv("AI_INFERENCE_USD", "0.01"))
+AI_ZAIM_FEE_USD = float(os.getenv("AI_ZAIM_FEE_USD", "0.30"))
+AI_PRICE_BUFFER = float(os.getenv("AI_PRICE_BUFFER", "1.10"))        # 10% volatility buffer
+
+class AiOpenReq(BaseModel):
+    seed_phrase: str   # the DERIVED AI seed; the main seed never appears here
+
+class AiTopupReq(BaseModel):
+    amount_zats: int
+
+class AiSendReq(BaseModel):
+    amount_zats: int
+    memo_chunks_b64: list[str]   # opaque ZAI1 ciphertext, already base64
+
+def _ai_wallet(session):
+    wn = session.get("ai_wallet")
+    if not wn:
+        raise HTTPException(409, detail="Open the AI account first")
+    return wn
+
+@app.post("/api/ai/open")
+async def ai_open(req: AiOpenReq, session=Depends(get_session)):
+    """Open (or create by restore) this user's AI wallet. Same sealing
+    machinery as the main wallet; the fingerprint namespace is zai_."""
+    norm = normalize_seed(req.seed_phrase)
+    fp = seed_fingerprint(norm)
+    wn = "zai_" + fp
+    restored = await _ensure_wallet_open(norm, wn, seed_key(norm, fp))
+    session["ai_wallet"] = wn
+    save_sessions()
+    bal = parse_balance(await azec(wn, "balance"))
+    height = 0
+    try:
+        h = await azec(wn, "height")
+        height = int(h.get("height", 0)) if isinstance(h, dict) else 0
+    except Exception:
+        pass
+    return {"restored": restored, "balance": bal, "height": height,
+            "relay_configured": bool(AI_RELAY_ADDRESS and AI_RELAY_PUBKEY)}
+
+@app.get("/api/ai/balance")
+async def ai_balance(session=Depends(get_session)):
+    return {"balance": parse_balance(await azec(_ai_wallet(session), "balance"))}
+
+@app.post("/api/ai/address")
+async def ai_address(session=Depends(get_session)):
+    """Fresh diversified orchard-only address on the AI account (reply addr)."""
+    res = await azec(_ai_wallet(session), "new_address", ["o"])
+    addr = res.get("address") if isinstance(res, dict) else None
+    if not addr:
+        # zingo prints the address list; last entry is the new one
+        try:
+            addr = res[-1]["encoded_address"] if isinstance(res, list) else str(res.get("raw", ""))[:0]
+        except Exception:
+            addr = ""
+    if not addr:
+        raise HTTPException(500, detail="Could not derive a reply address")
+    return {"address": addr}
+
+@app.post("/api/ai/topup")
+async def ai_topup(req: AiTopupReq, session=Depends(get_session)):
+    """Internal shielded transfer, main wallet -> AI wallet."""
+    if req.amount_zats < DUST:
+        raise HTTPException(400, detail="Amount too small")
+    ai_wn = _ai_wallet(session)
+    res = await azec(ai_wn, "new_address", ["o"])
+    dest = res.get("address") if isinstance(res, dict) else (res[-1].get("encoded_address") if isinstance(res, list) and res else None)
+    if not dest:
+        raise HTTPException(500, detail="Could not derive a top-up address")
+    outputs = [{"address": dest, "amount": req.amount_zats}]
+    result = await azec(session["wallet_name"], "quicksend", [json.dumps(outputs)])
+    txid = _extract_txid(result)
+    if not txid:
+        raise HTTPException(500, detail="Top-up did not return a txid")
+    return {"txid": txid, "amount_zats": req.amount_zats}
+
+@app.post("/api/ai/send")
+async def ai_send(req: AiSendReq, session=Depends(get_session)):
+    """One shielded tx from the AI wallet to the relay: quoted price on the
+    first output, every output carrying an opaque ciphertext chunk."""
+    if not AI_RELAY_ADDRESS:
+        raise HTTPException(503, detail="No relay is configured yet. The AI tab is in preview")
+    if not (1 <= len(req.memo_chunks_b64) <= 8):
+        raise HTTPException(400, detail="1 to 8 memo chunks")
+    for c in req.memo_chunks_b64:
+        if len(c) > 512:
+            raise HTTPException(400, detail="Memo chunk exceeds 512 bytes")
+        try:
+            base64.b64decode(c, validate=True)
+        except Exception:
+            raise HTTPException(400, detail="Memo chunks must be base64")
+    outputs = [{"address": AI_RELAY_ADDRESS,
+                "amount": req.amount_zats if i == 0 else DUST,
+                "memo": chunk}
+               for i, chunk in enumerate(req.memo_chunks_b64)]
+    result = await azec(_ai_wallet(session), "quicksend", [json.dumps(outputs)])
+    txid = _extract_txid(result)
+    if not txid:
+        raise HTTPException(500, detail="Send did not return a txid")
+    return {"txid": txid}
+
+@app.get("/api/ai/inbox")
+async def ai_inbox(session=Depends(get_session)):
+    """Ciphertext chunks received on the AI wallet. The server forwards raw
+    base64 memos whose decoded bytes start with the ZAI1 magic; parsing and
+    decryption happen in the browser."""
+    wn = _ai_wallet(session)
+    try:
+        res = await azec(wn, "messages")
+    except HTTPException:
+        return {"memos": []}
+    out = []
+    items = res if isinstance(res, list) else res.get("messages", []) if isinstance(res, dict) else []
+    for m in items:
+        memo = m.get("memo", "") if isinstance(m, dict) else ""
+        try:
+            raw = base64.b64decode(memo, validate=True)
+        except Exception:
+            continue
+        if raw[:4] == b"ZAI1":
+            out.append({"memo_b64": memo, "txid": m.get("txid", ""), "datetime": m.get("datetime", 0)})
+    return {"memos": out}
+
+_ai_price_cache = {"t": 0.0, "usd": 0.0}
+
+@app.get("/api/ai/quote")
+async def ai_quote():
+    """Price of one question, quoted in USD components and converted to ZEC at
+    spot with the volatility buffer. Flat for everyone, by design."""
+    now = time.time()
+    if now - _ai_price_cache["t"] > 60:
+        loop = asyncio.get_event_loop()
+        try:
+            usd, _ = await loop.run_in_executor(None, _fetch_zec_price)
+            if usd:
+                _ai_price_cache.update(t=now, usd=usd)
+        except Exception:
+            pass
+    zec_usd = _ai_price_cache["usd"]
+    if not zec_usd:
+        raise HTTPException(503, detail="Price feed unavailable; try again shortly")
+    usd_to_zats = lambda u: int(round(u / zec_usd * 1e8 * AI_PRICE_BUFFER))
+    components = {
+        "reply_network_zats": AI_REPLY_COST_ZATS,
+        "inference_zats": usd_to_zats(AI_INFERENCE_USD),
+        "zaim_fee_zats": usd_to_zats(AI_ZAIM_FEE_USD),
+    }
+    total = sum(components.values())
+    return {"zec_usd": zec_usd, "buffer": AI_PRICE_BUFFER,
+            "send_fee_zats": AI_SEND_COST_ZATS,   # paid by the user's own tx, shown for honesty
+            **components, "total_zats": total,
+            "total_usd": round(total / 1e8 * zec_usd, 2),
+            "relay_pubkey": AI_RELAY_PUBKEY,
+            "relay_configured": bool(AI_RELAY_ADDRESS and AI_RELAY_PUBKEY)}
 
 @app.get("/api/servers")
 async def list_servers():

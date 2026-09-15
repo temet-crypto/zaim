@@ -5,6 +5,8 @@ import AdminDashboard from "./AdminDashboard";
 import FeaturesScreen from "./Features.jsx";
 import { T, F, MAXPAIN_CSS } from "./styles/maxpain.js";
 import { apiGet, apiPost, takeNotice } from "./api.js";
+import AiTab from "./AiTab.jsx";
+import { deriveAiMnemonic } from "./ai/derive.js";
 import { QRCodeSVG } from "qrcode.react";
 
 // four geometric primitives for the bottom nav (icon always white)
@@ -13,6 +15,7 @@ const Prim = {
   triangle: (s = 26, c = "#fff") => <svg width={s} height={s} viewBox="0 0 24 24"><path d="M5 8h14l-7 10z" fill={c} /></svg>,
   circle: (s = 26, c = "#fff") => <svg width={s} height={s} viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill={c} /></svg>,
   diamond: (s = 26, c = "#fff") => <svg width={s} height={s} viewBox="0 0 24 24"><path d="M12 4l8 8-8 8-8-8z" fill={c} /></svg>,
+  slash: (s = 26, c = "#fff") => <svg width={s} height={s} viewBox="0 0 24 24"><path d="M15 4L9 20" stroke={c} strokeWidth="3" strokeLinecap="round" /></svg>,
 };
 
 const API = {
@@ -123,6 +126,17 @@ function AuthScreen({ onAuth }) {
         ? await API.createWallet()
         : await API.openWallet(seedIn.trim(), parseInt(birthday) || 0);
       localStorage.setItem("zaim_token", res.token);
+      // AI account: a second seed derived CLIENT-side from the one just typed.
+      // Fire-and-forget; the tab works once it lands, and failure only means
+      // the AI tab shows "open the AI account" later.
+      try {
+        const mainSeed = mode === "create" ? (res.seed?.seed || res.seed) : seedIn.trim();
+        const aiSeed = deriveAiMnemonic(mainSeed);
+        const bd = parseInt(localStorage.getItem("zaim_ai_birthday") || "0") || 0;
+        apiPost("/ai/open", { seed_phrase: aiSeed, birthday: bd })
+          .then((r) => { if (r.height) localStorage.setItem("zaim_ai_birthday", String(r.height)); })
+          .catch(() => {});
+      } catch (e) { /* non-fatal */ }
       if (res.seed) setSeed(typeof res.seed === "string" ? res.seed : (res.seed.seed || JSON.stringify(res.seed)));
       else onAuth();
     } catch (e) { setError(e.message); }
@@ -764,6 +778,7 @@ function NavBar({ active, onNav }) {
   const tabs = [
     { id: "home", icon: Prim.square, label: "Wallet" },
     { id: "messages", icon: Prim.triangle, label: "Message" },
+    { id: "ai", icon: Prim.slash, label: "AI" },
     { id: "geo", icon: Prim.circle, label: "Geo" },
     { id: "settings", icon: Prim.diamond, label: "Settings" },
   ];
@@ -799,6 +814,7 @@ export default function ZaimApp() {
       case "messages": return <MessengerScreen onNav={nav} />;
       case "chat": return chatContact ? <ChatScreen contact={chatContact} onBack={() => setScreen("messages")} /> : null;
       case "geo": return <ZAIMGeoVault />;
+      case "ai": return <AiTab aiReady={true} />;
       case "settings": return <SettingsScreen onLogout={logout} onAdmin={handleLogoTap} />;
       case "admin": return <AdminDashboard onExit={() => setScreen("settings")} />;
       default: return <HomeScreen onNav={nav} />;
