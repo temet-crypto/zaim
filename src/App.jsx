@@ -39,6 +39,7 @@ const API = {
   listRequests: () => API.get("/request/list"),
   syncPush: (contacts) => API.post("/sync/push", { contacts }),
   syncPull: () => API.get("/sync/pull"),
+  fees: () => API.get("/fees"),
   listServers: () => API.get("/servers"),
   getServer: () => API.get("/settings/server"),
   setServer: (server) => API.post("/settings/server", { server }),
@@ -599,6 +600,8 @@ function MessengerScreen({ onNav }) {
 function ChatScreen({ contact, onBack }) {
   const [input, setInput] = useState(""); const [sending, setSending] = useState(false);
   const [messages, setMessages] = useState([]); const [toast, setToast] = useState(""); const endRef = useRef(null);
+  const [fees, setFees] = useState(null);
+  useEffect(() => { API.fees().then(setFees).catch(() => { }); }, []);
   // This thread: what I sent to THIS address, what came back tagged with THIS
   // reply address, and incoming memos with no tag at all. The last group is
   // unattributable (a shielded memo carries no sender unless the sender says),
@@ -618,7 +621,14 @@ function ChatScreen({ contact, onBack }) {
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
   const sendMsg = async () => {
     if (!input.trim()) return; setSending(true);
-    try { await API.sendMessage(contact.address, input.trim()); setMessages(p => [...p, { memo: input.trim(), to: contact.address, amount: 0.0001, txid: "pending", sent: true }]); setInput(""); setToast("Sent"); setTimeout(() => setToast(""), 2500); }
+    try {
+      const r = await API.sendMessage(contact.address, input.trim());
+      setMessages(p => [...p, { memo: input.trim(), to: contact.address, amount: 0.0001, txid: "pending", sent: true }]);
+      setInput("");
+      setToast(r?.fee_zats ? `Sent · ZAIM fee ${(r.fee_zats / 1e8).toFixed(5)} ZEC` : "Sent");
+      setTimeout(() => setToast(""), 2500);
+      if (r?.fee_zats) API.fees().then(setFees).catch(() => { });
+    }
     catch (e) { setToast("Failed: " + e.message); setTimeout(() => setToast(""), 3500); }
     setSending(false);
   };
@@ -636,7 +646,11 @@ function ChatScreen({ contact, onBack }) {
         </div>
       </div>
       <div className="mp-scroll" style={{ padding: "16px", background: T.off }}>
-        {messages.length === 0 && <div style={{ textAlign: "center", padding: "32px 0" }}><span className="mp-quip">Send a message as a shielded memo. 0.0001 ZEC each.</span></div>}
+        {messages.length === 0 && <div style={{ textAlign: "center", padding: "32px 0" }}><span className="mp-quip">
+          {fees?.messenger_fee_enabled
+            ? `Send a message as a shielded memo. Network fee plus a ${(fees.msg_fee_zats / 1e8).toFixed(5)} ZEC ZAIM fee, about $${fees.msg_fee_usd.toFixed(2)}.`
+            : "Send a message as a shielded memo. 0.0001 ZEC each."}
+        </span></div>}
         {messages.map((m, i) => {
           const me = m.sent;
           return (
@@ -667,9 +681,11 @@ function SettingsScreen({ onLogout, onAdmin }) {
   const [health, setHealth] = useState(null);
   const [seed, setSeed] = useState(null); const [showSeed, setShowSeed] = useState(false);
   const [seedLoading, setSeedLoading] = useState(false); const [toast, setToast] = useState("");
+  const [fees, setFees] = useState(null);
   const [servers, setServers] = useState(null); const [mine, setMine] = useState("");
   const [switching, setSwitching] = useState("");
   useEffect(() => { API.health().then(setHealth).catch(() => { }); }, []);
+  useEffect(() => { API.fees().then(setFees).catch(() => { }); }, []);
   useEffect(() => {
     API.listServers().then(setServers).catch(() => { });
     API.getServer().then(r => setMine(r.server)).catch(() => { });
@@ -742,6 +758,13 @@ function SettingsScreen({ onLogout, onAdmin }) {
       <KVm k="Key Storage" v="Server side · custodial" />
       <KV k="Memo Privacy" v="ON-CHAIN" color={T.teal} />
       <KVm k="Address Type" v="z address · shielded" />
+      {fees?.messenger_fee_enabled && (
+        <>
+          <div className="mp-section">ZAIM FEES</div>
+          <KVm k="Per message" v={`${(fees.msg_fee_zats / 1e8).toFixed(5)} ZEC · $${fees.msg_fee_usd.toFixed(2)}`} />
+          <KVm k="Paid to date" v={`${(fees.lifetime_fees_zats / 1e8).toFixed(5)} ZEC`} color={T.blue} />
+        </>
+      )}
       <div className="mp-section">ACCOUNT</div>
       <KVm k="Identity" v="your seed · no account" color={T.blue} />
       <KVm k="At rest" v="sealed · seed encrypted" color={T.teal} />

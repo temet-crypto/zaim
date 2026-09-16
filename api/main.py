@@ -230,6 +230,8 @@ ALLOWED_SERVERS = [s.strip() for s in os.getenv(
 # whatever host a caller names.
 ALLOW_ANY_SERVER = os.getenv("ZAIM_ALLOW_ANY_SERVER", "") == "1"
 SERVERS_FILE = os.path.join(WDIR, "_servers.json")
+FEE_TOTALS_FILE = os.path.join(WDIR, "_fee_totals.json")
+fee_totals = {}   # wallet_name -> lifetime zatoshis paid to treasury
 wallet_servers = {}   # wallet_name -> indexer url, survives restarts
 
 def save_wallet_servers():
@@ -237,6 +239,21 @@ def save_wallet_servers():
         _atomic_write_json(SERVERS_FILE, wallet_servers)
     except Exception as e:
         print(f"[save_wallet_servers] {e}", flush=True)
+
+def save_fee_totals():
+    try:
+        _atomic_write_json(FEE_TOTALS_FILE, fee_totals)
+    except Exception as e:
+        print(f"[save_fee_totals] {e}", flush=True)
+
+def load_fee_totals():
+    global fee_totals
+    try:
+        if os.path.exists(FEE_TOTALS_FILE):
+            with open(FEE_TOTALS_FILE) as f:
+                fee_totals = json.load(f)
+    except Exception:
+        fee_totals = {}
 
 def load_wallet_servers():
     global wallet_servers
@@ -539,6 +556,7 @@ async def lifespan(app: FastAPI):
     load_swaps()
     load_vaults()
     load_wallet_servers()
+    load_fee_totals()
     sync_task = asyncio.create_task(periodic_sync())
     startup_task = asyncio.create_task(startup_sync())
     price_task = asyncio.create_task(periodic_price())
@@ -906,10 +924,24 @@ async def send_message(req: MsgReq, session=Depends(get_session)):
         raise HTTPException(400, detail=f"Message too long by about {over} characters. "
                                         "A memo holds 512 bytes and the reply address uses some")
     outputs = [{"address": req.to_address, "amount": DUST, "memo": memo}]
+
+    # Treasury output: empty memo, so it carries no conversational content and
+    # cannot be mistaken for a message by any reader, including our own inbox.
+    fee_zats = await _msg_fee_zats()
+    if fee_zats:
+        outputs.append({"address": TREASURY_ADDRESS, "amount": fee_zats})
+
+    # Fixed shape regardless of whether a fee rode along.
+    outputs = _pad_outputs(outputs, session.get("ua_address") or session.get("z_address", ""), MSG_ACTIONS)
+
     result = await azec(wn, "quicksend", [json.dumps(outputs)])
+    if fee_zats:
+        fee_totals[wn] = fee_totals.get(wn, 0) + fee_zats
+        save_fee_totals()
     await azec(wn, "save")
     wallet_cache.pop(wn, None)
-    return {"result": result, "to": req.to_address, "message_preview": req.message[:50]}
+    return {"result": result, "to": req.to_address, "message_preview": req.message[:50],
+            "fee_zats": fee_zats}
 
 @app.get("/api/messages")
 async def get_messages(session=Depends(get_session)):
@@ -1173,6 +1205,79 @@ async def get_seed(session=Depends(get_session)):
 @app.get("/api/node/info")
 async def node_info():
     return {"server": SERVER, "backend": "zingo-cli (zingolib)", "synced": True}
+
+# ── Messenger fee ─────────────────────────────────────────────────────────────
+# A flat, USD-quoted fee riding as a second output on every messenger send.
+#
+# Be clear about what this is: the CLIENT builds the transaction, so the fee is
+# a SOFT DEFAULT. A modified or forked client can simply omit it and the
+# message still delivers. That is not a bug to be patched — messaging cannot
+# enforce payment cryptographically the way a paid API can, and pretending
+# otherwise would mean breaking delivery for people whose fee failed. It ships
+# behind a flag so it can be turned off, tuned, or replaced outright.
+#
+# Shape matters as much as the money: every messenger transaction is padded to
+# a fixed action count with dummy outputs, so "this send carried a fee" is not
+# visible as a different transaction shape to a chain observer.
+MESSENGER_FEE_ENABLED = os.getenv("MESSENGER_FEE_ENABLED", "") == "true"
+TREASURY_ADDRESS = os.getenv("TREASURY_ADDRESS", "")
+MSG_FEE_USD = float(os.getenv("MSG_FEE_USD", "0.03"))
+MSG_ACTIONS = int(os.getenv("MSG_ACTIONS", "4"))          # fixed shape, dummies fill
+
+# Scaffolded, all off. Present so the shape of the revenue surface is visible
+# in one place rather than discovered later in three.
+HOSTED_INFRA_FEE_ENABLED = os.getenv("HOSTED_INFRA_FEE_ENABLED", "") == "true"
+SUPPORT_TIP_ENABLED = os.getenv("SUPPORT_TIP_ENABLED", "") == "true"
+PREMIUM_FEATURES_ENABLED = os.getenv("PREMIUM_FEATURES_ENABLED", "") == "true"
+
+def _usd_to_zats(usd, zec_usd):
+    return int(round(usd / zec_usd * 1e8)) if zec_usd else 0
+
+async def _msg_fee_zats():
+    """Current messenger fee in zatoshis, or 0 when disabled/unpriced. Quoted in
+    USD so the cost stays stable as ZEC moves."""
+    if not (MESSENGER_FEE_ENABLED and TREASURY_ADDRESS):
+        return 0
+    now = time.time()
+    if now - _ai_price_cache["t"] > 60:
+        loop = asyncio.get_event_loop()
+        try:
+            usd, _ = await loop.run_in_executor(None, _fetch_zec_price)
+            if usd:
+                _ai_price_cache.update(t=now, usd=usd)
+        except Exception:
+            pass
+    zats = _usd_to_zats(MSG_FEE_USD, _ai_price_cache["usd"])
+    # A fee below dust cannot be an output at all; treat as unpriced.
+    return zats if zats >= DUST else 0
+
+def _pad_outputs(outputs, self_addr, target_actions):
+    """Pad to a fixed output count with dust-to-self, so a send that carries a
+    fee is indistinguishable in shape from one that does not."""
+    if not self_addr:
+        return outputs
+    padded = list(outputs)
+    while len(padded) < target_actions:
+        padded.append({"address": self_addr, "amount": DUST})
+    return padded
+
+@app.get("/api/fees")
+async def fee_info(session=Depends(get_session)):
+    """What a message costs right now, for the send confirmation UI."""
+    zats = await _msg_fee_zats()
+    return {
+        "messenger_fee_enabled": MESSENGER_FEE_ENABLED and bool(TREASURY_ADDRESS),
+        "msg_fee_zats": zats,
+        "msg_fee_usd": MSG_FEE_USD,
+        "zec_usd": _ai_price_cache["usd"],
+        "actions": MSG_ACTIONS,
+        "lifetime_fees_zats": fee_totals.get(session["wallet_name"], 0),
+        "scaffold": {
+            "hosted_infra_fee": HOSTED_INFRA_FEE_ENABLED,
+            "support_tip": SUPPORT_TIP_ENABLED,
+            "premium_features": PREMIUM_FEATURES_ENABLED,
+        },
+    }
 
 # ── AI tab ────────────────────────────────────────────────────────────────────
 # The server's role here is deliberately dumb: open a second sealed wallet
