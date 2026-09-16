@@ -10,7 +10,8 @@
 import { useEffect, useRef, useState } from "react";
 import { T, F } from "./styles/maxpain.js";
 import { apiGet, apiPost } from "./api.js";
-import { buildRequest, hex, TYPE, MEMO_MAX } from "./ai/protocol.js";
+import { assembleReply, buildRequest, hex, parseReplyMemo, TYPE, MEMO_MAX } from "./ai/protocol.js";
+import { clearPending, listPending, savePending } from "./ai/store.js";
 import { convHash, newConvSecret, ZERO_CONV } from "./ai/derive.js";
 
 const b64 = (u8) => btoa(String.fromCharCode(...u8));
@@ -38,6 +39,52 @@ export default function AiTab({ aiReady, storeKey }) {
     if (aiReady) apiGet("/ai/balance").then((r) => setBalance(r.balance)).catch(() => {});
   };
   useEffect(refresh, [aiReady]);
+
+  // Reply poller. Runs off the PERSISTED pending list, not component state, so
+  // an answer still lands after a refresh, a crash, or a tab reopened hours
+  // later — the question was paid for and the key outlives the page.
+  useEffect(() => {
+    if (mock || !aiReady || !storeKey) return;
+    let alive = true;
+    const tick = async () => {
+      let pending;
+      try { pending = await listPending(storeKey); } catch { return; }
+      if (!pending.length) return;
+      let memos;
+      try { memos = (await apiGet("/ai/inbox")).memos ?? []; } catch { return; }
+      const byReq = new Map();
+      for (const m of memos) {
+        let raw;
+        try { raw = Uint8Array.from(atob(m.memo_b64), (c) => c.charCodeAt(0)); } catch { continue; }
+        let p;
+        try { p = parseReplyMemo(raw); } catch { continue; }   // dummies land here
+        if (p.type === TYPE.DUMMY) continue;
+        const k = hex(p.reqId);
+        if (!byReq.has(k)) byReq.set(k, []);
+        byReq.get(k).push(p);
+      }
+      for (const req of pending) {
+        const chunks = byReq.get(req.id);
+        if (!chunks) continue;
+        let text;
+        try { text = await assembleReply(chunks, req.ephSk); } catch { continue; }
+        if (text === null || !alive) continue;      // still missing chunks
+        const kind = chunks[0].type;
+        setMsgs((prev) => {
+          const copy = prev.slice();
+          const slot = copy.find((x) => x.role === "ai" && x.reqId === req.id && x.status !== "answered");
+          if (slot) { slot.status = kind === TYPE.REP ? "answered" : "failed"; slot.text = text; }
+          else copy.push({ role: "ai", text, status: kind === TYPE.REP ? "answered" : "failed", reqId: req.id });
+          return copy;
+        });
+        req.ephSk.fill(0);
+        await clearPending(req.id);   // only after it opened
+      }
+    };
+    tick();
+    const t = setInterval(() => { if (!document.hidden) tick(); }, 20000);
+    return () => { alive = false; clearInterval(t); };
+  }, [mock, aiReady, storeKey]);
   useEffect(() => { scroller.current?.scrollTo(0, 1e9); }, [msgs]);
 
   const mock = !quote?.relay_configured;
@@ -72,14 +119,16 @@ export default function AiTab({ aiReady, storeKey }) {
       } else {
         if (spendable < totalZats) throw new Error("AI balance too low. Top up first");
         const addr = (await apiPost("/ai/address", {})).address;
-        const { memos, ephSk } = await buildRequest({ question: q, convHash: convHash(convSecret), replyAddr: addr, relayPk: hexToBytes(quote.relay_pubkey) });
+        const { memos, ephSk, reqId } = await buildRequest({ question: q, convHash: convHash(convSecret), replyAddr: addr, relayPk: hexToBytes(quote.relay_pubkey) });
+        // Persist the ephemeral key BEFORE broadcasting. Once the question is
+        // on chain it has been paid for, and this key is the only thing that
+        // can ever open the answer — a refresh here would strand it forever.
+        const reqIdHex = hex(reqId);
+        if (storeKey) await savePending(reqIdHex, ephSk, { question: q, addr }, storeKey);
         const r = await apiPost("/ai/send", { amount_zats: totalZats, memo_chunks_b64: memos.map(b64) });
         mine.status = "confirmed";
-        set({ status: "thinking", reqTxid: r.txid });
-        // Poll the inbox until the reply chunks assemble (Phase 3 wires this
-        // to real REP memos; the ephemeral key lives only in this closure).
+        set({ status: "thinking", reqId: reqIdHex });
         say("Question sent shielded. Waiting for the relay…");
-        ephSk.fill(0); // Phase 3: retained until the answer decrypts
       }
     } catch (e) {
       mine.status = "failed";

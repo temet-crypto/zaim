@@ -6,7 +6,7 @@ import FeaturesScreen from "./Features.jsx";
 import { T, F, MAXPAIN_CSS } from "./styles/maxpain.js";
 import { apiGet, apiPost, takeNotice } from "./api.js";
 import AiTab from "./AiTab.jsx";
-import { deriveAiMnemonic } from "./ai/derive.js";
+import { deriveAiMnemonic, deriveStoreKey } from "./ai/derive.js";
 import { QRCodeSVG } from "qrcode.react";
 
 // four geometric primitives for the bottom nav (icon always white)
@@ -138,6 +138,9 @@ function AuthScreen({ onAuth }) {
       try {
         const mainSeed = mode === "create" ? (res.seed?.seed || res.seed) : seedIn.trim();
         const aiSeed = deriveAiMnemonic(mainSeed);
+        // The store key never leaves the browser; it encrypts conversations and
+        // the pending ephemeral keys that answers depend on.
+        try { sessionStorage.setItem("zaim_ai_sk", Array.from(deriveStoreKey(aiSeed)).join(",")); } catch (e) { }
         const bd = parseInt(localStorage.getItem("zaim_ai_birthday") || "0") || 0;
         apiPost("/ai/open", { seed_phrase: aiSeed, birthday: bd })
           .then((r) => { if (r.height) localStorage.setItem("zaim_ai_birthday", String(r.height)); })
@@ -827,6 +830,14 @@ export default function ZaimApp() {
   const [screen, setScreen] = useState("home"); const [chatContact, setChatContact] = useState(null);
   const [tapCount, setTapCount] = useState(0);
   const handleLogoTap = () => { const n = tapCount + 1; setTapCount(n); if (n >= 5) { setScreen("admin"); setTapCount(0); } };
+  // Recovered from sessionStorage so a refresh keeps decryption working for
+  // the rest of the session without ever putting the key on disk.
+  const aiStoreKey = (() => {
+    try {
+      const raw = sessionStorage.getItem("zaim_ai_sk");
+      return raw ? Uint8Array.from(raw.split(",").map(Number)) : null;
+    } catch (e) { return null; }
+  })();
   const nav = (s, d) => { if (s === "chat" && d) { setChatContact(d); setScreen("chat"); } else setScreen(s); };
   const logout = async () => {
     try { await API.logout(); } catch (e) { }  // seal server side, best effort
@@ -842,7 +853,7 @@ export default function ZaimApp() {
       case "messages": return <MessengerScreen onNav={nav} />;
       case "chat": return chatContact ? <ChatScreen contact={chatContact} onBack={() => setScreen("messages")} /> : null;
       case "geo": return <ZAIMGeoVault />;
-      case "ai": return <AiTab aiReady={true} />;
+      case "ai": return <AiTab aiReady={true} storeKey={aiStoreKey} />;
       case "settings": return <SettingsScreen onLogout={logout} onAdmin={handleLogoTap} />;
       case "admin": return <AdminDashboard onExit={() => setScreen("settings")} />;
       default: return <HomeScreen onNav={nav} />;

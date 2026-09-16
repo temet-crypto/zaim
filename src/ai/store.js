@@ -7,11 +7,13 @@ import { openDB } from "idb";
 
 const DB = "zaim-ai";
 const STORE = "conversations";
+const PENDING = "pending";
 
 async function db() {
-  return openDB(DB, 1, {
-    upgrade(d) {
-      d.createObjectStore(STORE, { keyPath: "id" });
+  return openDB(DB, 2, {
+    upgrade(d, oldVersion) {
+      if (oldVersion < 1) d.createObjectStore(STORE, { keyPath: "id" });
+      if (oldVersion < 2) d.createObjectStore(PENDING, { keyPath: "id" });
     },
   });
 }
@@ -34,6 +36,39 @@ async function openJson(buf, keyBytes) {
   const key = await aesKey(keyBytes, "decrypt");
   const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b.slice(0, 12) }, key, b.slice(12));
   return JSON.parse(new TextDecoder().decode(pt));
+}
+
+// ── pending requests ─────────────────────────────────────────────────────────
+// The ephemeral secret key is the ONLY thing that can open an answer. Held in
+// a closure alone, closing the tab or refreshing the page before the reply
+// lands makes a PAID answer undecryptable forever: the ciphertext sits on
+// chain and the key is gone. So it is persisted, encrypted at rest with the
+// store key, from the moment the question is sent until the answer opens.
+
+export async function savePending(reqIdHex, ephSk, meta, keyBytes) {
+  const d = await db();
+  await d.put(PENDING, {
+    id: reqIdHex,
+    blob: await sealJson({ ephSk: Array.from(ephSk), ...meta, ts: Date.now() }, keyBytes),
+  });
+}
+
+export async function listPending(keyBytes) {
+  const d = await db();
+  const out = [];
+  for (const r of await d.getAll(PENDING)) {
+    try {
+      const v = await openJson(r.blob, keyBytes);
+      out.push({ ...v, id: r.id, ephSk: Uint8Array.from(v.ephSk) });
+    } catch { /* wrong key or corrupt */ }
+  }
+  return out;
+}
+
+/** Call only after the answer has decrypted, or the answer becomes unreadable. */
+export async function clearPending(reqIdHex) {
+  const d = await db();
+  await d.delete(PENDING, reqIdHex);
 }
 
 /** conversation shape: { id, title, convSecret(hex), messages: [{role, text, status, reqId, ts}] } */
