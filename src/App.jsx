@@ -71,6 +71,9 @@ function parseZcashUri(s) {
 // Dev log shown on the sign in screen. ZAIM entries only. Newest first.
 // The status bar shows the first sentence of the newest entry.
 const ZAIM_LOG = [
+  { d: "Sep 16 2026", v: "0.10.0", t: "An AI tab, in preview. Ask a question and it is sealed on your device, sent from a separate AI account with its own seed, and answered inside a shielded memo only your browser can open. The relay and the AI provider read the question and never learn who asked. Our own server carries bytes it cannot read. Replies are padded to a fixed size and sent in batches with decoy traffic, so nothing on chain links a question to its answer." },
+  { d: "Sep 15 2026", v: "0.9.4", t: "Security pass, and a Tor address. ZAIM now answers at a .onion, so you can reach it without your request crossing the open internet. Added a content security policy, a limit on sign in attempts, core dumps switched off, and a plain statement on the Features screen of exactly what our server can and cannot see. Also fixed a fault that had quietly served the site as a download instead of a page since August 21." },
+  { d: "Aug 21 2026", v: "0.9.3", t: "New home. ZAIM moved to zaimwallet.com on a machine we run, with certificates that renew themselves. Sessions and wallets carried over untouched." },
   { d: "Jul 30 2026", v: "0.9.2", t: "Payment requests and chain synced contacts. Create a request any Zcash wallet can pay, with a fresh address every time so invoices cannot be linked. And your contact book can now follow your seed: encrypted memos written to yourself on the chain itself. New device, same seed, your people are there. No server copy, ever." },
   { d: "Jul 30 2026", v: "0.9.1", t: "Privacy and honesty pass. Fonts now load from our own server, so opening ZAIM tells nobody else you did. Messages thread by contact with a reply address inside the memo. Payment fees show before you send. Vault escrow now verifies funding on chain before a vault arms." },
   { d: "Jul 20 2026", v: "0.9.0", t: "New wallet engine, built and tested ahead of the July 28 Ironwood network upgrade. Wallet infrastructure moved to a maintained server." },
@@ -81,6 +84,8 @@ const ZAIM_LOG = [
 
 // What we are working toward. Shown under the dev log. Newest plans first.
 const ZAIM_UPCOMING = [
+  { k: "AI", title: "The AI relay goes live", t: "The AI tab runs against a test network today. Next it moves to its own machine, kept apart from everything else, so the service that reads your question is never the one that knows your balance." },
+  { k: "KEYS", title: "Keys that never leave your device", t: "Today our server holds your wallet while you are signed in, and we say so plainly. The plan is to move signing into your browser, so we carry bytes and nothing more." },
   { k: "NODE", title: "Run our own node", t: "Right now your wallet talks to a shared Zcash server. We plan to run our own, so your addresses and activity pass through fewer hands." },
 ];
 

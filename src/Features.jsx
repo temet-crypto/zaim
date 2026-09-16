@@ -193,6 +193,27 @@ const SeedVisual = () => (
   </div>
 );
 
+const AiVisual = () => (
+  <div>
+    <div style={{ padding: "11px 12px", borderBottom: `2px solid ${T.black}` }}>
+      <Lbl>ANONYMOUS QUESTION</Lbl>
+      <div style={{ border: `2px solid ${T.black}`, background: T.blue, color: T.white, padding: "7px 9px", marginTop: 6, fontFamily: F.body, fontSize: 12 }}>
+        What is a shielded transaction?
+      </div>
+      <Lbl style={{ marginTop: 4, color: T.teal }}>SEALED ON THIS DEVICE</Lbl>
+    </div>
+    <div style={{ padding: "11px 12px", background: T.white }}>
+      <div style={{ border: `2px solid ${T.black}`, background: T.off, padding: "7px 9px", fontFamily: F.body, fontSize: 12 }}>
+        A transfer where the amount and the parties stay hidden behind a proof.
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
+        <Lbl>ANSWERED IN A SHIELDED MEMO</Lbl>
+        <Lbl style={{ color: T.blue }}>0.0008 ZEC</Lbl>
+      </div>
+    </div>
+  </div>
+);
+
 // A plain claim in the honest section. No visual, no sample data: the point is
 // that these read as statements the project is willing to be held to.
 function Claim({ n, head, children }) {
@@ -263,6 +284,11 @@ export default function FeaturesScreen({ onBack }) {
         <SeedVisual />
       </Feature>
 
+      <Feature n="09" name="Anonymous AI" tag="PREVIEW" tagColor={T.blue}
+        desc="Ask an AI a question from a separate account with its own seed. The question is sealed on your device, travels as a shielded transaction, and the answer comes back encrypted to a key only this browser holds.">
+        <AiVisual />
+      </Feature>
+
       <div className="mp-section">THE HONEST PART</div>
       <div className="mp-band mp-band-w">
         <div className="mp-quip">Read this before you put real money in. It is the part most wallets bury.</div>
@@ -279,7 +305,13 @@ export default function FeaturesScreen({ onBack }) {
       <Claim n="04" head="You can leave whenever you want">
         Your seed is a standard Zcash seed. Type it into Zashi, Ywallet or any other Zcash wallet and you get the same funds and the same history. Nothing here is locked to us.
       </Claim>
-      <Claim n="05" head="If you want none of the above">
+      <Claim n="05" head="The AI tab knows less about you than we do">
+        Questions are sealed in your browser before they reach us, so our server carries
+        ciphertext it cannot read. The relay and the AI provider read the question and
+        never learn who asked. What we can still see is that your account used the AI tab
+        and what it paid, and we would rather say that than let you assume otherwise.
+      </Claim>
+      <Claim n="06" head="If you want none of the above">
         Run ZAIM yourself. The whole thing is public and MIT licensed, and self hosting is documented in the repo, so the only server holding your seed is one you control.
       </Claim>
 
