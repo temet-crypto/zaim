@@ -244,49 +244,49 @@ export default function FeaturesScreen({ onBack }) {
         <div className="mp-quip">Everything ZAIM does, one screen at a time. Sample numbers, real screens.</div>
       </div>
 
-      <Feature n="01" name="Shielded wallet"
-        desc="A single screen for your shielded and transparent balances, the live ZEC price, and every transaction the wallet has seen.">
-        <WalletVisual />
-      </Feature>
-
-      <Feature n="02" name="Send ZEC"
-        desc="Pay any shielded or unified address, with an optional memo that travels encrypted inside the transaction itself.">
-        <SendVisual />
-      </Feature>
-
-      <Feature n="03" name="Payment requests"
-        desc="Ask for an exact amount with a zcash: link and QR that any Zcash wallet can pay, built on a fresh address every time so your invoices cannot be tied together.">
-        <RequestVisual />
-      </Feature>
-
-      <Feature n="04" name="Messages"
+      <Feature n="01" name="Messages"
         desc="Each message is a real shielded transaction carrying an encrypted memo, so the chain proves it happened while the words stay between you and the recipient.">
         <MessagesVisual />
       </Feature>
 
-      <Feature n="05" name="Chain synced contacts"
-        desc="Your contact book can ride the chain as encrypted memos written to yourself, so a new device with your seed pulls your people with no server copy anywhere.">
-        <SyncVisual />
+      <Feature n="02" name="Anonymous AI" tag="PREVIEW" tagColor={T.blue}
+        desc="Ask an AI a question from a separate account with its own seed. The question is sealed on your device, travels as a shielded transaction, and the answer comes back encrypted to a key only this browser holds.">
+        <AiVisual />
       </Feature>
 
-      <Feature n="06" name="Cross chain swaps"
-        desc="Trade BTC, ETH, SOL or USDC for ZEC and back through NEAR Intents, with no account and no order book, and cancel any swap you have not funded.">
-        <SwapVisual />
-      </Feature>
-
-      <Feature n="07" name="GeoVault" tag="IN TESTING" tagColor={T.red}
+      <Feature n="03" name="GeoVault" tag="IN TESTING" tagColor={T.red}
         desc="Park ZEC and a message at a set of coordinates in ZAIM escrow, where only someone inside the radius during your window can release it, and anything nobody claims comes back to you when the window closes.">
         <GeoVisual />
       </Feature>
 
-      <Feature n="08" name="Seed only sign in"
-        desc="There is no username and no password, because your seed phrase is the login, and signing out seals the wallet with a key derived from that same seed.">
-        <SeedVisual />
+      <Feature n="04" name="Shielded wallet"
+        desc="A single screen for your shielded and transparent balances, the live ZEC price, and every transaction the wallet has seen.">
+        <WalletVisual />
       </Feature>
 
-      <Feature n="09" name="Anonymous AI" tag="PREVIEW" tagColor={T.blue}
-        desc="Ask an AI a question from a separate account with its own seed. The question is sealed on your device, travels as a shielded transaction, and the answer comes back encrypted to a key only this browser holds.">
-        <AiVisual />
+      <Feature n="05" name="Send ZEC"
+        desc="Pay any shielded or unified address, with an optional memo that travels encrypted inside the transaction itself.">
+        <SendVisual />
+      </Feature>
+
+      <Feature n="06" name="Payment requests"
+        desc="Ask for an exact amount with a zcash: link and QR that any Zcash wallet can pay, built on a fresh address every time so your invoices cannot be tied together.">
+        <RequestVisual />
+      </Feature>
+
+      <Feature n="07" name="Chain synced contacts"
+        desc="Your contact book can ride the chain as encrypted memos written to yourself, so a new device with your seed pulls your people with no server copy anywhere.">
+        <SyncVisual />
+      </Feature>
+
+      <Feature n="08" name="Cross chain swaps"
+        desc="Trade BTC, ETH, SOL or USDC for ZEC and back through NEAR Intents, with no account and no order book, and cancel any swap you have not funded.">
+        <SwapVisual />
+      </Feature>
+
+      <Feature n="09" name="Seed only sign in"
+        desc="There is no username and no password, because your seed phrase is the login, and signing out seals the wallet with a key derived from that same seed.">
+        <SeedVisual />
       </Feature>
 
       <div className="mp-section">THE HONEST PART</div>
