@@ -18,7 +18,7 @@ Notes:
     Same seed always lands in the same wallet, from any device, no account row.
 """
 import os, json, time, uuid, hashlib, hmac, secrets, asyncio, subprocess, re, socket
-import tarfile, shutil, io, base64, gzip
+import tarfile, shutil, io, base64, gzip, urllib.parse
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from typing import Optional
@@ -1494,6 +1494,189 @@ async def fee_info(session=Depends(get_session)):
             "premium_features": PREMIUM_FEATURES_ENABLED,
         },
     }
+
+# ── Inscriptions ──────────────────────────────────────────────────────────────
+# Zcash inscriptions live in TRANSPARENT scriptSigs. ZAIM wallets are shielded,
+# and the two do not meet, so the mint is funded by a sidecar service holding
+# its own transparent key (zord-carrier), which sends the inscription straight
+# to the user's transparent address in the same reveal.
+#
+# Two consequences the UI must state rather than bury:
+#   1. The mint is custodial for the length of one transaction. The user never
+#      holds the minting key, so they are trusting us to actually send it.
+#   2. What they end up owning sits at a TRANSPARENT address, publicly, forever.
+#      That is inherent to inscriptions, not a choice we made, and it is a real
+#      privacy cost in a wallet that otherwise has none.
+
+ZORD_URL = os.getenv("ZORD_URL", "")                       # unset = feature off
+ZORD_TOKEN = os.getenv("ZORD_TOKEN", "")
+INSCRIPTION_FEE_USD = float(os.getenv("INSCRIPTION_FEE_USD", "1.00"))
+
+def _zord(path, body=None, timeout=60):
+    """Blocking call to the mint sidecar. Runs in an executor; never on the loop."""
+    import urllib.request, urllib.error
+    req = urllib.request.Request(
+        ZORD_URL.rstrip("/") + path,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + ZORD_TOKEN},
+        method="POST" if body is not None else "GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode()).get("error", "")
+        except Exception:
+            detail = ""
+        # The sidecar's messages are written for users (what to do about content
+        # that is too large, which half of a mint landed). Pass them through.
+        raise HTTPException(e.code if e.code < 500 else 502,
+                            detail=detail or f"The mint service returned {e.code}")
+    except Exception:
+        raise HTTPException(503, detail="The mint service is not reachable")
+
+async def azord(path, body=None, timeout=60):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: _zord(path, body, timeout))
+
+def _require_inscriptions():
+    if not ZORD_URL or not ZORD_TOKEN:
+        raise HTTPException(503, detail="Inscriptions are not enabled on this server")
+    # Minting bills after broadcasting, so with nowhere to bill to every mint
+    # would be free and the loss would only show up in the logs.
+    if not TREASURY_ADDRESS:
+        raise HTTPException(503, detail="Inscriptions are not enabled on this server")
+
+async def _inscription_fee_zats():
+    """Our cut, on top of the chain cost the sidecar quotes."""
+    if INSCRIPTION_FEE_USD <= 0:
+        return 0
+    loop = asyncio.get_event_loop()
+    try:
+        usd, _ = await loop.run_in_executor(None, _fetch_zec_price)
+    except Exception:
+        usd = 0
+    if not usd:
+        raise HTTPException(503, detail="Price feed unavailable; try again shortly")
+    return int(round(INSCRIPTION_FEE_USD / usd * 1e8))
+
+class InscribeReq(BaseModel):
+    kind: str = "artifact"               # artifact | text | deploy | mint
+    content_type: Optional[str] = None
+    content_base64: Optional[str] = None
+    text: Optional[str] = None
+    collection: Optional[str] = None
+    supply: Optional[int] = None
+    meta_cid: Optional[str] = None
+    royalty_bps: Optional[int] = None
+    id: Optional[int] = None
+    # Present only on a view-only session, which has no spend authority.
+    seed_phrase: Optional[str] = None
+
+def _zord_body(req: InscribeReq, destination):
+    body = {"kind": req.kind, "destination": destination}
+    for src, dst in (("content_type", "contentType"), ("content_base64", "contentBase64"),
+                     ("text", "text"), ("collection", "collection"), ("supply", "supply"),
+                     ("meta_cid", "metaCid"), ("royalty_bps", "royaltyBps"), ("id", "id")):
+        v = getattr(req, src)
+        if v is not None:
+            body[dst] = v
+    return body
+
+@app.get("/api/inscriptions/status")
+async def inscriptions_status(session=Depends(get_session)):
+    if not ZORD_URL or not ZORD_TOKEN:
+        return {"enabled": False}
+    try:
+        s = await azord("/status", timeout=15)
+    except HTTPException:
+        return {"enabled": False, "reachable": False}
+    return {"enabled": True, "reachable": True, "network": s.get("network"),
+            "broadcast_enabled": s.get("broadcastEnabled"),
+            "indexed_to": s.get("indexedTo"), "chain_tip": s.get("chainTip"),
+            "address": session.get("t_address", "")}
+
+@app.post("/api/inscriptions/quote")
+async def inscriptions_quote(req: InscribeReq, session=Depends(get_session)):
+    """What this inscription costs, built rather than estimated.
+
+    The sidecar runs the real build and stops before broadcast, so the number
+    here is the number charged. Works with broadcasting disabled, which is how
+    the screen can be exercised before the feature is live."""
+    _require_inscriptions()
+    dest = session.get("t_address", "")
+    if not dest:
+        raise HTTPException(400, detail="This wallet has no transparent address to receive an inscription")
+    q = await azord("/quote", _zord_body(req, dest))
+    chain_zats = int(q["totalSpend"])
+    our_zats = await _inscription_fee_zats()
+    return {"chain_zats": chain_zats, "fee_zats": our_zats,
+            "total_zats": chain_zats + our_zats,
+            "total_zec": (chain_zats + our_zats) / 1e8,
+            "destination": dest, "content_bytes": q.get("contentBytes")}
+
+@app.post("/api/inscriptions/mint")
+async def inscriptions_mint(req: InscribeReq, session=Depends(get_session)):
+    """Broadcast an inscription and then charge for it.
+
+    Deliberately in that order. Charging first would mean a failed mint leaves
+    the user out of pocket with no way for us to refund automatically — the
+    treasury is swept, not spendable from here. So we check the balance covers
+    it, mint, and bill. If the bill fails after a successful mint we carry the
+    loss, which is the right way round: the user is never charged for an
+    inscription that does not exist."""
+    _require_inscriptions()
+    wn = session["wallet_name"]
+    dest = session.get("t_address", "")
+    if not dest:
+        raise HTTPException(400, detail="This wallet has no transparent address to receive an inscription")
+
+    q = await azord("/quote", _zord_body(req, dest))
+    total = int(q["totalSpend"]) + await _inscription_fee_zats()
+
+    # Balance check before broadcasting, so the common failure is a refusal
+    # rather than an unbilled mint.
+    bal = await azec(wn, "balance")
+    spendable = 0
+    if isinstance(bal, dict):
+        for k in ("confirmed_ironwood_balance", "confirmed_orchard_balance", "spendable_orchard_balance"):
+            spendable = max(spendable, int(bal.get(k, 0) or 0))
+    if spendable < total:
+        raise HTTPException(400, detail=f"This costs {total / 1e8:.5f} ZEC and the wallet holds "
+                                        f"{spendable / 1e8:.5f}")
+
+    minted = await azord("/mint", _zord_body(req, dest), timeout=180)
+
+    charged, charge_error = 0, None
+    try:
+        outputs = [{"address": TREASURY_ADDRESS, "amount": total}]
+        if session.get("view_only"):
+            if not req.seed_phrase:
+                raise HTTPException(400, detail="Enter your seed phrase to pay for this inscription")
+            await _spend_once(session, SpendReq(seed_phrase=req.seed_phrase, outputs=outputs))
+        else:
+            await azec(wn, "quicksend", [json.dumps(outputs)])
+        charged = total
+    except Exception as e:
+        # Never fail the request over this: the inscription is already on chain
+        # and belongs to the user. Log loudly instead.
+        charge_error = _safe_cli_error(str(e))
+        print(f"[inscribe] MINTED BUT NOT CHARGED {minted.get('inscriptionId')} "
+              f"wallet={wn} zats={total}: {charge_error}", flush=True)
+
+    wallet_cache.pop(wn, None)
+    return {"inscription_id": minted.get("inscriptionId"),
+            "commit_txid": minted.get("commitTxid"), "reveal_txid": minted.get("revealTxid"),
+            "destination": dest, "charged_zats": charged,
+            "charge_failed": bool(charge_error)}
+
+@app.get("/api/inscriptions/owned")
+async def inscriptions_owned(session=Depends(get_session)):
+    _require_inscriptions()
+    dest = session.get("t_address", "")
+    if not dest:
+        return {"address": "", "count": 0, "inscriptions": []}
+    return await azord(f"/owned?address={urllib.parse.quote(dest)}", timeout=30)
 
 # ── AI tab ────────────────────────────────────────────────────────────────────
 # The server's role here is deliberately dumb: open a second sealed wallet

@@ -16,11 +16,16 @@ import tempfile
 
 import pytest
 
-WDIR = tempfile.mkdtemp(prefix="zaim-test-")
-os.environ["WALLET_DIR"] = WDIR
+os.environ.setdefault("WALLET_DIR", tempfile.mkdtemp(prefix="zaim-test-"))
 os.environ.setdefault("ZCASH_CHAIN", "mainnet")
 
 import api.main as m  # noqa: E402  (must follow the env set above)
+
+# Read the directory back off the module rather than trusting the env we just
+# set: whichever test module imports api.main first fixes it for the whole run,
+# and a test writing to a path the module is not using passes for the wrong
+# reason or fails for no reason.
+WDIR = m.WDIR
 
 # Structurally valid, never funded, never used. Only its shape matters here.
 MAIN_UFVK = "uview1" + "qz" * 80
