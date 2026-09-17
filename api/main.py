@@ -668,6 +668,9 @@ async def health():
             elif e.endswith(".sealed"):
                 sealed += 1
     return {"status": "ok" if cli_ok else "degraded", "backend": "zingo-cli (light client)",
+            # Unauthenticated because the Features screen is shown before sign
+            # in and must not advertise something this server cannot do.
+            "inscriptions": bool(ZORD_URL and ZORD_TOKEN and TREASURY_ADDRESS),
             "server": SERVER, "cli_available": cli_ok, "wallets_active": active,
             "wallets_sealed": sealed, "wallets": active + sealed, "sessions": len(sessions),
             # Disclosed so the UI can show the fee BEFORE a payment is sent.

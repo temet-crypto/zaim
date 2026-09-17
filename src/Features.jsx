@@ -2,8 +2,10 @@
 // Every visual below is built from the same tokens and classes the real screens
 // use, so a redesign of the app carries through here instead of going stale.
 // Nothing here is interactive. It is a look, not a demo.
+import { useEffect, useState } from "react";
 import { T, F } from "./styles/maxpain.js";
 import { QRCodeSVG } from "qrcode.react";
+import { apiGet } from "./api.js";
 
 const BackArrow = ({ onClick }) => (
   <button onClick={onClick} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", display: "flex" }} aria-label="Back">
@@ -229,7 +231,28 @@ function Claim({ n, head, children }) {
 }
 
 // ── screen ───────────────────────────────────────────────────────────────────
+/** Small square with a corner fold: a file, sitting in the open. */
+function InscriptionVisual() {
+  return (
+    <div style={{ padding: 20, display: "flex", justifyContent: "center" }}>
+      <svg width="120" height="90" viewBox="0 0 120 90" aria-hidden="true">
+        <path d="M30 10h44l16 16v54H30z" fill={T.white} stroke={T.black} strokeWidth="2.5" />
+        <path d="M74 10v16h16" fill="none" stroke={T.black} strokeWidth="2.5" />
+        <rect x="40" y="40" width="40" height="4" fill={T.blue} />
+        <rect x="40" y="52" width="30" height="4" fill={T.blue} />
+        <rect x="40" y="64" width="36" height="4" fill={T.red} />
+      </svg>
+    </div>
+  );
+}
+
 export default function FeaturesScreen({ onBack }) {
+  // Advertise it only where it exists. The screen renders before sign in, so
+  // this comes off the unauthenticated health route.
+  const [inscriptions, setInscriptions] = useState(false);
+  useEffect(() => {
+    apiGet("/health").then(h => setInscriptions(!!h.inscriptions)).catch(() => {});
+  }, []);
   return (
     <div className="mp-scroll">
       <div className="mp-head">
@@ -288,6 +311,13 @@ export default function FeaturesScreen({ onBack }) {
         desc="There is no username and no password, because your seed phrase is the login, and signing out seals the wallet with a key derived from that same seed.">
         <SeedVisual />
       </Feature>
+
+      {inscriptions && (
+        <Feature n="10" name="Inscriptions" tag="PUBLIC" tagColor={T.red}
+          desc="Write a small file onto Zcash itself and keep it at your own address. Read the warning on the screen first: an inscription is stored in the clear, unlike everything else here, and anyone can read it for as long as the chain exists.">
+          <InscriptionVisual />
+        </Feature>
+      )}
 
       <div className="mp-section">THE HONEST PART</div>
       <div className="mp-band mp-band-w">

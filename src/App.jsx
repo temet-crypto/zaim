@@ -6,6 +6,7 @@ import FeaturesScreen from "./Features.jsx";
 import { T, F, MAXPAIN_CSS } from "./styles/maxpain.js";
 import { apiGet, apiPost, takeNotice } from "./api.js";
 import AiTab from "./AiTab.jsx";
+import Inscriptions from "./Inscriptions.jsx";
 import { deriveAiMnemonic, deriveStoreKey } from "./ai/derive.js";
 import { ufvkFromSeed, prewarm as prewarmKeys } from "./ai/ufvk.js";
 import { holdSeed, takeSeed, canSpend, forgetSeed } from "./ai/spendkey.js";
@@ -347,6 +348,13 @@ function HomeScreen({ onNav }) {
   const [balance, setBalance] = useState(null); const [address, setAddress] = useState(""); const [tAddr, setTAddr] = useState("");
   const [txs, setTxs] = useState([]); const [loading, setLoading] = useState(true); const [toast, setToast] = useState("");
   const [price, setPrice] = useState(null); const [now, setNow] = useState(Date.now());
+  // The server decides whether inscriptions exist at all. Asking once here
+  // keeps the entry point off the screen entirely rather than showing a button
+  // that leads to an apology.
+  const [inscriptionsOn, setInscriptionsOn] = useState(false);
+  useEffect(() => {
+    apiGet("/inscriptions/status").then(s => setInscriptionsOn(!!s.enabled)).catch(() => {});
+  }, []);
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
@@ -437,6 +445,9 @@ function HomeScreen({ onNav }) {
         <button className="mp-btn" style={{ fontSize: 13, padding: "15px 4px", borderRight: `2px solid ${T.black}`, borderLeft: "none", borderTop: "none", borderBottom: "none", background: T.blue }} onClick={() => onNav("swap")}>SWAP</button>
         <button className="mp-btn ghost" style={{ fontSize: 13, padding: "15px 4px", border: "none" }} onClick={() => { if (address) { navigator.clipboard?.writeText(address); setToast("Address copied"); setTimeout(() => setToast(""), 1800); } }}>COPY</button>
       </div>
+      {inscriptionsOn && (
+        <button className="mp-btn ghost" style={{ fontSize: 13, padding: "15px 4px", width: "100%", border: "none", borderBottom: `2px solid ${T.black}` }} onClick={() => onNav("inscriptions")}>INSCRIPTIONS</button>
+      )}
       <div className="mp-section">RECENT TRANSACTIONS</div>
       {txs.length === 0 ? (
         <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">{loading ? "Syncing…" : "No transactions yet."}</span></div>
@@ -945,6 +956,7 @@ export default function ZaimApp() {
       case "chat": return chatContact ? <ChatScreen contact={chatContact} onBack={() => setScreen("messages")} /> : null;
       case "geo": return <ZAIMGeoVault />;
       case "ai": return <AiTab aiReady={true} storeKey={aiStoreKey} />;
+      case "inscriptions": return <Inscriptions onBack={() => setScreen("home")} viewOnly={viewOnly()} />;
       case "settings": return <SettingsScreen onLogout={logout} onAdmin={handleLogoTap} />;
       case "admin": return <AdminDashboard onExit={() => setScreen("settings")} />;
       default: return <HomeScreen onNav={nav} />;
