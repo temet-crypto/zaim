@@ -259,29 +259,29 @@ export default function FeaturesScreen({ onBack }) {
         <GeoVisual />
       </Feature>
 
-      <Feature n="04" name="Shielded wallet"
+      <Feature n="04" name="Cross chain swaps"
+        desc="Trade BTC, ETH, SOL or USDC for ZEC and back through NEAR Intents, with no account and no order book, and cancel any swap you have not funded.">
+        <SwapVisual />
+      </Feature>
+
+      <Feature n="05" name="Shielded wallet"
         desc="A single screen for your shielded and transparent balances, the live ZEC price, and every transaction the wallet has seen.">
         <WalletVisual />
       </Feature>
 
-      <Feature n="05" name="Send ZEC"
+      <Feature n="06" name="Send ZEC"
         desc="Pay any shielded or unified address, with an optional memo that travels encrypted inside the transaction itself.">
         <SendVisual />
       </Feature>
 
-      <Feature n="06" name="Payment requests"
+      <Feature n="07" name="Payment requests"
         desc="Ask for an exact amount with a zcash: link and QR that any Zcash wallet can pay, built on a fresh address every time so your invoices cannot be tied together.">
         <RequestVisual />
       </Feature>
 
-      <Feature n="07" name="Chain synced contacts"
+      <Feature n="08" name="Chain synced contacts"
         desc="Your contact book can ride the chain as encrypted memos written to yourself, so a new device with your seed pulls your people with no server copy anywhere.">
         <SyncVisual />
-      </Feature>
-
-      <Feature n="08" name="Cross chain swaps"
-        desc="Trade BTC, ETH, SOL or USDC for ZEC and back through NEAR Intents, with no account and no order book, and cancel any swap you have not funded.">
-        <SwapVisual />
       </Feature>
 
       <Feature n="09" name="Seed only sign in"
