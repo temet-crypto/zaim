@@ -7,7 +7,14 @@ import { T, F, MAXPAIN_CSS } from "./styles/maxpain.js";
 import { apiGet, apiPost, takeNotice } from "./api.js";
 import AiTab from "./AiTab.jsx";
 import { deriveAiMnemonic, deriveStoreKey } from "./ai/derive.js";
+import { ufvkFromSeed, prewarm as prewarmKeys } from "./ai/ufvk.js";
+import { holdSeed, takeSeed, canSpend, forgetSeed } from "./ai/spendkey.js";
 import { QRCodeSVG } from "qrcode.react";
+
+// Which chain this build talks to. Viewing keys are network tagged, so a
+// mismatch is refused by the server rather than quietly syncing an empty
+// wallet that reads to a user as lost funds.
+const ZCASH_NETWORK = import.meta.env.VITE_ZCASH_NETWORK || "mainnet";
 
 // four geometric primitives for the bottom nav (icon always white)
 const Prim = {
@@ -24,6 +31,8 @@ const API = {
   get: apiGet,
   createWallet: () => API.post("/wallet/create", {}),
   openWallet: (seed, birthday) => API.post("/wallet/open", { seed_phrase: seed, birthday: birthday || 0 }),
+  openView: (ufvk, birthday) => API.post("/wallet/open_view", { ufvk, birthday: birthday || 0 }),
+  spend: (seed, outputs, kind) => API.post("/wallet/send_with_seed", { seed_phrase: seed, outputs, kind: kind || "payment" }),
   logout: () => API.post("/wallet/logout", {}),
   getBalance: () => API.get("/wallet/balance"),
   getAddress: () => API.get("/wallet/address"),
@@ -44,6 +53,21 @@ const API = {
   getServer: () => API.get("/settings/server"),
   setServer: (server) => API.post("/settings/server", { server }),
 };
+
+/** True when the server holds only a viewing key for this session. */
+const viewOnly = () => localStorage.getItem("zaim_view_only") === "1";
+
+/**
+ * Spend from a view-only session. The server cannot sign, so the seed is sent
+ * with this one transaction and is gone when the call returns. Returns null if
+ * the seed is not in memory — the caller is expected to ask for it, which is
+ * what happens after a page reload.
+ */
+async function spendWithSeed(outputs, kind) {
+  const seed = takeSeed();
+  if (!seed) return null;
+  return API.spend(seed, outputs, kind);
+}
 
 // ZIP-321 parser for the Send screen: paste a zcash: link from any wallet and
 // the fields fill themselves. Memo arrives base64url encoded per the spec.
@@ -122,16 +146,41 @@ function AuthScreen({ onAuth }) {
     const iv = setInterval(load, 60000);
     return () => { alive = false; clearInterval(iv); };
   }, []);
+  // Fetch the key-derivation wasm while the user is still typing, so signing
+  // in does not stall on a 1.7 MB download.
+  useEffect(() => { if (mode === "open") prewarmKeys(); }, [mode]);
   const submit = async () => {
     setError("");
     if (mode === "open" && seedIn.trim().split(/\s+/).length < 12) return setError("Paste your full seed phrase");
     setLoading(true);
     if (mode === "open") setRestoring(true);
     try {
-      const res = mode === "create"
-        ? await API.createWallet()
-        : await API.openWallet(seedIn.trim(), parseInt(birthday) || 0);
+      let res;
+      if (mode === "create") {
+        // Creating a wallet is the one moment the server necessarily handles a
+        // seed: it generates the phrase. Sign in, below, does not.
+        res = await API.createWallet();
+      } else {
+        const phrase = seedIn.trim();
+        const bd = parseInt(birthday) || parseInt(localStorage.getItem("zaim_birthday") || "0") || 0;
+        try {
+          // The seed goes into wasm and a viewing key comes out. Only the
+          // viewing key is sent. Watch the network tab: no seed leaves here.
+          const ufvk = await ufvkFromSeed(phrase, ZCASH_NETWORK);
+          res = await API.openView(ufvk, bd);
+          holdSeed(phrase); // memory only, for sends; never written to disk
+        } catch (e) {
+          // Browsers without wasm, and any derivation failure, fall back to the
+          // old path rather than locking someone out of their money. It is
+          // strictly worse for privacy, so the session says so out loud.
+          console.warn("view-key sign in unavailable, using seed:", e?.message || e);
+          res = await API.openWallet(phrase, bd);
+        }
+      }
       localStorage.setItem("zaim_token", res.token);
+      if (res.view_only) localStorage.setItem("zaim_view_only", "1");
+      else localStorage.removeItem("zaim_view_only");
+      if (birthday) localStorage.setItem("zaim_birthday", String(parseInt(birthday)));
       // AI account: a second seed derived CLIENT-side from the one just typed.
       // Fire-and-forget; the tab works once it lands, and failure only means
       // the AI tab shows "open the AI account" later.
@@ -420,13 +469,27 @@ function SendScreen({ onBack }) {
   const [to, setTo] = useState(""); const [amount, setAmount] = useState(""); const [memo, setMemo] = useState("");
   const [loading, setLoading] = useState(false); const [result, setResult] = useState(null); const [error, setError] = useState("");
   const [feeBps, setFeeBps] = useState(0);
+  // A reload leaves the session able to read but not to spend, so the seed is
+  // asked for again at the moment it is actually needed.
+  const [askSeed, setAskSeed] = useState(false); const [seedForSend, setSeedForSend] = useState("");
   // The server discloses its fee; the screen repeats it BEFORE the send button.
   useEffect(() => { API.health().then(h => setFeeBps(h.fee_bps || 0)).catch(() => { }); }, []);
   const send = async () => {
     if (!to) return setError("Enter address");
     if (!amount || parseFloat(amount) <= 0) return setError("Enter amount");
     setLoading(true); setError("");
-    try { const r = await API.sendPayment(to, parseFloat(amount), memo); setResult(r); } catch (e) { setError(e.message); }
+    try {
+      // A view-only session has no spend authority on the server, by
+      // construction. The seed is handed over for this one transaction.
+      let r;
+      if (viewOnly()) {
+        r = await spendWithSeed([{ address: to, amount: parseFloat(amount), memo }], "payment");
+        if (!r) { setAskSeed(true); setLoading(false); return; }
+      } else {
+        r = await API.sendPayment(to, parseFloat(amount), memo);
+      }
+      setResult(r);
+    } catch (e) { setError(e.message); }
     setLoading(false);
   };
   if (result) return (
@@ -459,8 +522,25 @@ function SendScreen({ onBack }) {
           {feeBps > 0 && <div className="mp-lbl-sm" style={{ marginTop: 6, color: T.blue }}>A {(feeBps / 100).toFixed(2)}% APP FEE IS ADDED ON TOP. THE RECIPIENT GETS THE FULL AMOUNT</div>}
         </div>
         <div><div className="mp-lbl-sm" style={{ marginBottom: 6 }}>MEMO · OPTIONAL</div><input className="mp-input" value={memo} onChange={e => setMemo(e.target.value)} maxLength={400} placeholder="Encrypted memo on the chain" /></div>
+        {askSeed && (
+          <div style={{ border: `2px solid ${T.black}`, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div className="mp-lbl-sm">SEED PHRASE · TO AUTHORISE THIS SEND</div>
+            <div className="mp-quip" style={{ margin: 0 }}>
+              We hold only your viewing key, so we can show you this wallet but cannot move
+              anything in it. Your seed signs this one payment and is dropped when it completes.
+            </div>
+            <textarea className="mp-input" rows={3} value={seedForSend} onChange={e => setSeedForSend(e.target.value)}
+              placeholder="Your 24 words" style={{ resize: "none", fontFamily: F.mono, fontSize: 13, lineHeight: 1.6 }} />
+            <button className="mp-btn" disabled={loading} onClick={() => {
+              if (seedForSend.trim().split(/\s+/).length < 12) return setError("Paste your full seed phrase");
+              holdSeed(seedForSend);
+              setSeedForSend(""); setAskSeed(false); setError("");
+              send();
+            }}>AUTHORISE AND SEND</button>
+          </div>
+        )}
         {error && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase", letterSpacing: .5 }}>{error}</div>}
-        <button className="mp-btn" onClick={send} disabled={loading}>{loading ? "SENDING…" : "SEND"}</button>
+        {!askSeed && <button className="mp-btn" onClick={send} disabled={loading}>{loading ? "SENDING…" : "SEND"}</button>}
       </div>
     </div>
   );
@@ -628,9 +708,18 @@ function ChatScreen({ contact, onBack }) {
   }, [load]);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
   const sendMsg = async () => {
-    if (!input.trim()) return; setSending(true);
+    if (!input.trim()) return;
+    // A message is a payment carrying a memo, so it needs spend authority too.
+    if (viewOnly() && !canSpend()) {
+      setToast("Reload dropped your spend key. Send a payment once to unlock messages");
+      setTimeout(() => setToast(""), 4000);
+      return;
+    }
+    setSending(true);
     try {
-      const r = await API.sendMessage(contact.address, input.trim());
+      const r = viewOnly()
+        ? await spendWithSeed([{ address: contact.address, memo: input.trim() }], "message")
+        : await API.sendMessage(contact.address, input.trim());
       setMessages(p => [...p, { memo: input.trim(), to: contact.address, amount: 0.0001, txid: "pending", sent: true }]);
       setInput("");
       setToast(r?.fee_zats ? `Sent · ZAIM fee ${(r.fee_zats / 1e8).toFixed(5)} ZEC` : "Sent");
@@ -841,7 +930,9 @@ export default function ZaimApp() {
   const nav = (s, d) => { if (s === "chat" && d) { setChatContact(d); setScreen("chat"); } else setScreen(s); };
   const logout = async () => {
     try { await API.logout(); } catch (e) { }  // seal server side, best effort
+    forgetSeed();
     localStorage.removeItem("zaim_token"); localStorage.removeItem("zaim_user");
+    localStorage.removeItem("zaim_view_only");
     setAuthed(false); setScreen("home");
   };
   const render = () => {

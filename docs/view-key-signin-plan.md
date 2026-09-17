@@ -88,19 +88,48 @@ server has no seed to restore from, so:
   derive it from the UFVK instead, or the server cannot re-seal what it opened.
   **This is the subtlest part of the change and needs its own test.**
 
-## Work
+## Work — built 2026-09-17
 
-| step | scope |
+| step | state |
 |---|---|
-| wasm derivation module | Rust crate + wasm-bindgen, one exported function, vendored into `src/ai/`. ~1 day incl. the cross-build. |
-| `/api/wallet/open_view` | mirrors `_ensure_wallet_open` with `--viewkey`; new `zv_` namespace; seal key from UFVK. ~1 day. |
-| send path | accept per-send seed, derive, sign, wipe; never log, never persist. ~1 day. |
-| sealing + recovery tests | the failure mode is an unopenable wallet, so this gets real tests. ~1 day. |
-| UI + honest claims | claim 01 rewritten; a visible indicator for read-only vs spend-capable session. ~half a day. |
+| wasm derivation module | **done.** `zaim-keys` crate, two exported functions, vendored at `src/keys/`. Lazy-loaded, so the 1.7 MB lands on the sign-in tap and not on first paint. |
+| `/api/wallet/open_view` | **done.** `zv_` namespace, seal key from the UFVK, network checked against the running chain. |
+| send path | **done.** `/api/wallet/send_with_seed`; the seed signs one transaction and is dropped in a `finally`. |
+| sealing + recovery tests | **done.** 34 Python tests, the repo's first. |
+| UI + honest claims | **done.** Claims 01 to 03 rewritten. Send asks for the seed again after a reload. |
 
-Call it **a week**, and it is worth it: "we never receive your seed at sign in"
-is a claim almost no hosted wallet can make, and it is verifiable by anyone
-watching the request.
+### Proven, not assumed
+
+Run against testnet on 2026-09-17, through ZAIM's own code path rather than a
+hand-typed CLI command:
+
+- `_ensure_view_wallet_open` restores from a UFVK: **4,558 blocks, 2,279
+  ironwood outputs, 100% scanned**
+- the resulting wallet reads **82,528 zats and 8 memos**, matching the source
+- a spend from it fails: *"No unified spending key found for this account. No
+  spend capability"*
+- the wasm reproduces zingolib's UFVK **byte for byte** on both networks
+  (golden vectors from `zingo-cli export_ufvk`, asserted in `ufvk.test.js`)
+
+### Two things this shook out
+
+- **`--chain` was never passed.** Every zingo invocation relied on the CLI
+  defaulting to mainnet, so `ZCASH_CHAIN` was decorative and testnet was
+  unreachable. Now explicit at all three call sites.
+- **The spend path skipped fees and padding.** `_spend_once` went straight to
+  `quicksend`, so a view-only send paid no app fee and carried no dust padding
+  — a revenue leak and, worse, a transaction shaped differently from a normal
+  one. `_apply_fees` now applies exactly what the seed-session endpoints apply.
+
+### Left for later
+
+- Creating a wallet still generates the seed server-side. Only sign in changed,
+  which is what the claims say.
+- A user who has signed in with a seed before gets a **new `zv_` wallet that
+  rescans from their birthday** on first view-key sign in. Slow once, and two
+  wallet directories until the old one is cleaned up.
+- Browser-side signing is still the endgame; this shrinks the window, it does
+  not close it.
 
 ## Risks
 

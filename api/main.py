@@ -31,6 +31,10 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 CLI = os.getenv("ZAIM_CLI", os.getenv("ZECWALLET_CLI", "/app/zingo-cli"))
 SERVER = os.getenv("LIGHTWALLETD_SERVER", "https://zec.rocks:443")
 WDIR = os.getenv("WALLET_DIR", "/app/wallets")
+# zingo-cli defaults to mainnet when --chain is omitted, which is what ZAIM has
+# always relied on. Named here so view-key validation can refuse a key from the
+# wrong network instead of silently syncing nothing.
+CHAIN_NAME = os.getenv("ZCASH_CHAIN", "mainnet")
 # No default: unset means admin is OFF. A guessable shipped password on a
 # wallet server is worse than no admin panel at all.
 ADMIN_PASSWORD = os.getenv("ZAIM_ADMIN_PASSWORD", "")
@@ -110,6 +114,39 @@ def seed_fingerprint(norm_seed):
 def seed_key(norm_seed, fp):
     return hashlib.pbkdf2_hmac("sha256", norm_seed.encode(), ("zaim-seal-v1:" + fp).encode(), PBKDF2_ITER)
 
+# ── view-key identity ─────────────────────────────────────────────────────────
+# A view-key wallet has no seed here, so it cannot use seed_key. Its seal key
+# comes from the UFVK instead. That is a weaker secret than a seed — the client
+# hands us the UFVK on every sign in, so anyone who can replay a sign in can
+# re-derive it — but the thing being protected is READ access to data the UFVK
+# already grants. It buys encryption at rest against a stolen disk, and claims
+# nothing more.
+#
+# The namespaces are deliberately separate (zw_ vs zv_): a seed wallet's seal
+# key cannot be reproduced from a UFVK, so a wallet sealed one way must never
+# be looked for the other way. Mixing them yields a wallet nobody can open.
+
+# Shielded value could not exist before these heights, so there is nothing for
+# a viewing key to find below them.
+SAPLING_ACTIVATION = {"mainnet": 419_200, "testnet": 280_000}
+
+def ufvk_fingerprint(ufvk):
+    return hashlib.sha256(("zaim-ufvk-v1:" + ufvk.strip()).encode()).hexdigest()[:16]
+
+def ufvk_key(ufvk, fp):
+    return hashlib.pbkdf2_hmac("sha256", ufvk.strip().encode(), ("zaim-vseal-v1:" + fp).encode(), PBKDF2_ITER)
+
+def normalize_ufvk(ufvk):
+    u = (ufvk or "").strip()
+    if not re.fullmatch(r"uview(test)?1[a-z0-9]{100,2000}", u):
+        raise HTTPException(400, detail="That does not look like a unified full viewing key")
+    want_test = u.startswith("uviewtest1")
+    # A testnet key on a mainnet server syncs nothing and confuses every
+    # balance the user sees, so refuse it at the door.
+    if want_test != ("test" in CHAIN_NAME):
+        raise HTTPException(400, detail="That viewing key is for the wrong network")
+    return u
+
 def _wallet_paths(wn):
     return os.path.join(WDIR, wn), os.path.join(WDIR, wn + ".sealed")
 
@@ -173,7 +210,7 @@ async def periodic_seal():
                 wdir = os.path.join(WDIR, entry)
                 # Only seed-fingerprint wallets participate in sealing; legacy
                 # password-era dirs (zaim_*) stay untouched until removed.
-                if not os.path.isdir(wdir) or not entry.startswith(("zw_", "zai_")):
+                if not os.path.isdir(wdir) or not entry.startswith(("zw_", "zai_", "zv_")):
                     continue
                 last = wallet_activity.get(entry, 0)
                 if now - last > IDLE_SEAL_SEC:
@@ -334,7 +371,8 @@ def _safe_cli_error(text):
 
 def zec(wallet_name, command, args=None):
     wdir, env = wallet_env(wallet_name)
-    cmd = cli_prefix() + [CLI, "--server", wallet_server(wallet_name), "--data-dir", wdir, command]
+    cmd = cli_prefix() + [CLI, "--chain", CHAIN_NAME, "--server", wallet_server(wallet_name),
+                          "--data-dir", wdir, command]
     if args:
         cmd.extend([str(a) for a in args])
     try:
@@ -374,7 +412,7 @@ async def azec(wn, cmd, args=None):
     a plaintext dir right after sealing (the CLI makes a FRESH wallet in any
     empty HOME it is pointed at)."""
     async with _wlock(wn):
-        if wn.startswith(("zw_", "zai_")) and not os.path.isdir(os.path.join(WDIR, wn)):
+        if wn.startswith(("zw_", "zai_", "zv_")) and not os.path.isdir(os.path.join(WDIR, wn)):
             raise HTTPException(409, detail="wallet is sealed")
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, zec, wn, cmd, args)
@@ -769,7 +807,8 @@ async def _ensure_wallet_open(norm, wn, key, birthday=0):
         else:
             # Fresh restore from seed. The seed goes to the CLI process only.
             _, env = wallet_env(wn)
-            restore_cmd = cli_prefix() + [CLI, "--server", wallet_server(wn), "--data-dir", wdir, "--seed", norm]
+            restore_cmd = cli_prefix() + [CLI, "--chain", CHAIN_NAME, "--server", wallet_server(wn),
+                                          "--data-dir", wdir, "--seed", norm]
             if birthday > 0:
                 restore_cmd += ["--birthday", str(birthday)]
             restore_cmd += ["sync", "run"]
@@ -797,6 +836,183 @@ async def _ensure_wallet_open(norm, wn, key, birthday=0):
     except Exception:
         pass
     return restored
+
+class OpenViewReq(BaseModel):
+    ufvk: str
+    birthday: int = 0
+    server: str = ""
+
+class SpendReq(BaseModel):
+    """A single spend authorised by a seed that is not kept.
+
+    The seed arrives, signs one transaction, and is gone when the call
+    returns. That is a real and stateable reduction from holding it for a
+    whole session — and it is not the same as never seeing it, which needs
+    browser-side proving. Say the former, do not imply the latter."""
+    seed_phrase: str
+    outputs: list[dict]          # [{address, amount, memo?}]
+    # Which of the two normal paths this stands in for. A view-only send must
+    # end up with the same fee and the same on-chain shape as the equivalent
+    # seed-session send, or the choice of sign-in method becomes visible both
+    # in our revenue and, worse, in the transaction itself.
+    kind: str = "payment"        # "payment" | "message"
+
+async def _spend_once(session, req: SpendReq):
+    """Open a throwaway spend-capable wallet from the seed, send, then seal it
+    and drop the key. Nothing spendable outlives this call."""
+    norm = normalize_seed(req.seed_phrase)
+    fp = seed_fingerprint(norm)
+    wn = "zw_" + fp
+    key = seed_key(norm, fp)
+    view_wn = session["wallet_name"]
+    # The seed must belong to the viewing key already signed in, or one user
+    # could drive a send from another user's wallet through their own session.
+    if view_wn.startswith("zv_"):
+        expected = session.get("spend_wallet")
+        if expected and expected != wn:
+            raise HTTPException(403, detail="That seed does not match this session")
+    try:
+        await _ensure_wallet_open(norm, wn, key)
+        result = await azec(wn, "quicksend", [json.dumps(req.outputs)])
+        txid = _extract_txid(result)
+        if not txid:
+            raise HTTPException(500, detail="The send did not return a txid. Check your transactions before retrying")
+        session["spend_wallet"] = wn
+        save_sessions()
+        return txid
+    finally:
+        # Drop the spend capability immediately, whatever happened above.
+        wallet_keys.pop(wn, None)
+        try:
+            await aseal(wn)
+        except Exception:
+            pass
+
+@app.post("/api/wallet/send_with_seed")
+async def send_with_seed(req: SpendReq, session=Depends(get_session)):
+    """Authorise one spend from a view-only session.
+
+    Interim design, and the UI says so: the honest claim is that the seed never
+    arrives at sign in or while reading, and arrives only for the moment of a
+    send. Browser-side signing removes even that."""
+    if not req.outputs or len(req.outputs) > 8:
+        raise HTTPException(400, detail="1 to 8 outputs")
+    req.outputs, fee_zats = await _apply_fees(session, req.kind, req.outputs)
+    txid = await _spend_once(session, req)
+    if fee_zats and req.kind == "message":
+        wn = session["wallet_name"]
+        fee_totals[wn] = fee_totals.get(wn, 0) + fee_zats
+        save_fee_totals()
+    wallet_cache.pop(session["wallet_name"], None)
+    return {"txid": txid, "fee_zats": fee_zats, "fee_zec": fee_zats / 1e8}
+
+async def _apply_fees(session, kind, outputs):
+    """Add the same fee output, and the same padding, that the seed-session
+    endpoints add. Returns the outputs to sign and the fee charged."""
+    if kind == "message":
+        reply_addr = session.get("z_address", "")
+        out = []
+        for o in outputs:
+            memo = (o.get("memo") or "") + (f"\nReply-to: {reply_addr}" if reply_addr else "")
+            if len(memo.encode("utf-8")) > MEMO_BYTES_MAX:
+                raise HTTPException(400, detail="Message too long for a 512 byte memo")
+            out.append({"address": o["address"], "amount": DUST, "memo": memo})
+        fee_zats = await _msg_fee_zats()
+        if fee_zats:
+            out.append({"address": TREASURY_ADDRESS, "amount": fee_zats})
+        self_addr = session.get("ua_address") or session.get("z_address", "")
+        return _pad_outputs(out, self_addr, MSG_ACTIONS), fee_zats
+
+    # Amounts arrive in ZEC, as they do at /api/wallet/send, so there is one
+    # unit convention at the API boundary. Converting here rather than in the
+    # browser means a client bug cannot quietly send a rounded-down zero.
+    out = []
+    for o in outputs:
+        zats = int((Decimal(str(o.get("amount", 0))) * 100_000_000).to_integral_value(rounding=ROUND_DOWN))
+        if zats <= 0:
+            raise HTTPException(400, detail="Amount too small")
+        e = {"address": o["address"], "amount": zats}
+        if o.get("memo"):
+            if len(o["memo"].encode("utf-8")) > MEMO_BYTES_MAX:
+                raise HTTPException(400, detail="Memo too long for a 512 byte field")
+            e["memo"] = o["memo"]
+        out.append(e)
+
+    total = sum(o["amount"] for o in out)
+    fee_zats = 0
+    if FEE_ADDRESS and FEE_BPS > 0 and total > 0:
+        fee_zats = max(FEE_MIN_ZATS, total * FEE_BPS // 10000)
+        if fee_zats > 0:
+            out.append({"address": FEE_ADDRESS, "amount": fee_zats})
+    return out, fee_zats
+
+async def _ensure_view_wallet_open(ufvk, wn, key, birthday):
+    """Open a view-only wallet, restoring from the UFVK when it is new.
+
+    Same sealing machinery as a seed wallet; the only differences are the
+    namespace and that zingo is handed --viewkey instead of --seed. What comes
+    out cannot spend, by construction, not by policy."""
+    wdir, sealed = _wallet_paths(wn)
+    loop = asyncio.get_event_loop()
+    restored = False
+    if not os.path.isdir(wdir):
+        if os.path.exists(sealed):
+            await loop.run_in_executor(None, unseal_wallet, wn, key)
+        else:
+            _, env = wallet_env(wn)
+            # A UFVK carries no birthday, so without one we fall back to
+            # sapling activation and scan the whole chain. That is slow — hours
+            # for a wallet that may be days old — but refusing outright would
+            # strand anyone who never wrote their height down. The client is
+            # expected to supply it, and to remember it afterwards.
+            if birthday <= 0:
+                birthday = SAPLING_ACTIVATION.get(CHAIN_NAME, 419200)
+            restore_cmd = cli_prefix() + [CLI, "--chain", CHAIN_NAME, "--server", wallet_server(wn),
+                                          "--data-dir", wdir, "--viewkey", ufvk,
+                                          "--birthday", str(birthday), "sync", "run"]
+            try:
+                async with restore_sem():
+                    r = await loop.run_in_executor(None, lambda: subprocess.run(
+                        restore_cmd, capture_output=True, text=True, timeout=600, env=env))
+                if r.returncode != 0 and "error" in (r.stderr + r.stdout).lower():
+                    shutil.rmtree(wdir, ignore_errors=True)
+                    print(f"[viewrestore] failed rc={r.returncode} for {wn}", flush=True)
+                    raise HTTPException(500, detail="Could not open that viewing key. Check the birthday height and try again")
+            except subprocess.TimeoutExpired:
+                pass  # long rescan; the wallet exists and sync continues
+            restored = True
+    wallet_keys[wn] = key
+    try:
+        await azec(wn, "save")
+    except Exception:
+        pass
+    return restored
+
+@app.post("/api/wallet/open_view")
+async def open_view_wallet(req: OpenViewReq, request: Request):
+    """Sign in with a viewing key. The seed never reaches this server.
+
+    The wallet that results can read everything — balances, history, memos
+    sent and received — and cannot move a single zatoshi. Spending is a
+    separate, explicit act (see /api/wallet/send_with_seed)."""
+    throttle_signin(request)
+    ufvk = normalize_ufvk(req.ufvk)
+    fp = ufvk_fingerprint(ufvk)
+    wn = "zv_" + fp
+    if req.server:
+        chosen = validate_server(req.server)
+        if wallet_servers.get(wn) != chosen:
+            wallet_servers[wn] = chosen
+            save_wallet_servers()
+    restored = await _ensure_view_wallet_open(ufvk, wn, ufvk_key(ufvk, fp), req.birthday)
+    z_addr, t_addr, ua_addr = await _read_addresses(wn)
+    token = _new_session(wn, z_addr, t_addr, ua_addr)
+    sessions[token]["view_only"] = True
+    save_sessions()
+    asyncio.create_task(sync_and_cache(wn))
+    return {"token": token, "address": z_addr, "t_address": t_addr,
+            "restored": restored, "view_only": True,
+            "message": "Syncing from the chain. Balances may take a few minutes" if restored else "Unlocked, read only"}
 
 @app.post("/api/wallet/open")
 async def open_wallet(req: OpenReq, request: Request):

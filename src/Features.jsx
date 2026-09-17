@@ -293,14 +293,25 @@ export default function FeaturesScreen({ onBack }) {
       <div className="mp-band mp-band-w">
         <div className="mp-quip">Read this before you put real money in. It is the part most wallets bury.</div>
       </div>
-      <Claim n="01" head="You type your seed into our server">
-        The wallet engine runs here, not in your browser. Signing in sends us your seed phrase over TLS, and we need it to build the wallet.
+      <Claim n="01" head="Signing in no longer sends us your seed">
+        Your seed stays in your browser. It goes into a key derivation that runs on your own
+        device, and only the viewing key that comes out is sent to us. A viewing key lets us
+        sync your wallet, show your balance and read your memos. It cannot move money, and
+        that is arithmetic, not a promise we are making. Open the network tab and check.
       </Claim>
-      <Claim n="02" head="While you are signed in, this server can spend">
-        Your keys sit in our memory for as long as your session is open. Anyone who takes control of this machine during that window can move your funds. Treat ZAIM as a hot wallet.
+      <Claim n="02" head="Sending is the exception, and it is brief">
+        Because we hold no spending key, a payment needs one. Your seed is sent with that
+        single transaction, signs it, and is dropped before the request returns. So the window
+        where this server could spend your funds is a few seconds per payment rather than
+        your whole session. It is smaller. It is not zero, and we will not pretend it is.
+        Closing the tab drops it too, which is why sending again after a reload asks once more.
       </Claim>
       <Claim n="03" head="Sealed means sealed">
-        When you sign out, or after 30 idle minutes, your wallet is encrypted with a key derived from your own seed and the plaintext is deleted. We cannot open a sealed wallet. Neither can anyone who steals the disk.
+        When you sign out, or after 30 idle minutes, your wallet is encrypted and the plaintext
+        is deleted. The key comes from your viewing key, so it arrives with you and leaves with
+        you. Someone who steals the disk gets ciphertext. Be clear on the limit though: anyone
+        who can replay your sign in holds that key, so this protects a stolen disk, not a
+        compromised server.
       </Claim>
       <Claim n="04" head="You can leave whenever you want">
         Your seed is a standard Zcash seed. Type it into Zashi, Ywallet or any other Zcash wallet and you get the same funds and the same history. Nothing here is locked to us.
