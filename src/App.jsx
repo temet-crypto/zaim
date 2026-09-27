@@ -61,7 +61,8 @@ const viewOnly = () => localStorage.getItem("zaim_view_only") === "1";
 
 /**
  * Spend from a view-only session. The server cannot sign, so the seed is sent
- * with this one transaction and is gone when the call returns. Returns null if
+ * with the transaction and opens the spend wallet for 10 minutes after the last
+ * send (server side SPEND_WINDOW_SEC), then it is sealed. Returns null if
  * the seed is not in memory — the caller is expected to ask for it, which is
  * what happens after a page reload.
  */
@@ -510,7 +511,7 @@ function SendScreen({ onBack }) {
     setLoading(true); setError("");
     try {
       // A view-only session has no spend authority on the server, by
-      // construction. The seed is handed over for this one transaction.
+      // construction. The seed opens it for a 10 minute window.
       let r;
       if (viewOnly()) {
         r = await spendWithSeed([{ address: to, amount: parseFloat(amount), memo }], "payment");

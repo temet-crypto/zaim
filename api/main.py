@@ -760,8 +760,10 @@ async def lifespan(app: FastAPI):
     vault_task = asyncio.create_task(periodic_vaults())
     escrow_task = asyncio.create_task(ensure_escrow())
     migration_task = asyncio.create_task(periodic_migration())
+    spend_lock_task = asyncio.create_task(periodic_spend_lock())
     yield
     migration_task.cancel()
+    spend_lock_task.cancel()
     sync_task.cancel()
     startup_task.cancel()
     price_task.cancel()
@@ -1066,11 +1068,14 @@ class OpenViewReq(BaseModel):
     server: str = ""
 
 class SpendReq(BaseModel):
-    """A single spend authorised by a seed that is not kept.
+    """A spend authorised by a seed the server does not keep past a short window.
 
-    The seed arrives, signs one transaction, and is gone when the call
-    returns. That is a real and stateable reduction from holding it for a
-    whole session — and it is not the same as never seeing it, which needs
+    The seed arrives and opens the spend wallet, which stays open for
+    SPEND_WINDOW_SEC after the last send and is then sealed. With zingo v6 each
+    open costs a ~2 minute mixnet bootstrap, so sealing after every send made a
+    conversation wait two minutes per message; Dusty chose the window
+    (2026-09-27). That is a real reduction from holding spend authority for a
+    whole session, and it is not the same as never seeing the seed, which needs
     browser-side proving. Say the former, do not imply the latter."""
     seed_phrase: str
     outputs: list[dict]          # [{address, amount, memo?}]
@@ -1080,9 +1085,39 @@ class SpendReq(BaseModel):
     # in our revenue and, worse, in the transaction itself.
     kind: str = "payment"        # "payment" | "message"
 
+SPEND_WINDOW_SEC = int(os.getenv("ZAIM_SPEND_WINDOW_MIN", "10")) * 60
+spend_windows = {}   # spend wallet -> unix time its window closes
+
+async def lock_spend_wallet(wn):
+    spend_windows.pop(wn, None)
+    try:
+        await aseal(wn)
+    finally:
+        wallet_keys.pop(wn, None)
+
+async def periodic_spend_lock():
+    """Seal a view-key session's spend wallet when its window lapses. A wallet
+    that is migrating stays open: the migration screen keeps it active, and the
+    idle seal closes it when that stops."""
+    while True:
+        await asyncio.sleep(30)
+        now = time.time()
+        for wn, closes in list(spend_windows.items()):
+            if now < closes:
+                continue
+            if os.path.exists(_migration_marker(wn)):
+                spend_windows.pop(wn, None)
+                continue
+            try:
+                await lock_spend_wallet(wn)
+                print(f"[spend] {wn} window closed, sealed", flush=True)
+            except Exception as e:
+                print(f"[spend] {wn} lock failed: {e!r}", flush=True)
+
 async def _spend_once(session, req: SpendReq):
-    """Open a throwaway spend-capable wallet from the seed, send, then seal it
-    and drop the key. Nothing spendable outlives this call."""
+    """Open the spend-capable wallet from the seed (or reuse it while its window
+    is open), send, and push the window out. periodic_spend_lock seals it once
+    the window lapses; signing out seals it at once."""
     norm = normalize_seed(req.seed_phrase)
     fp = seed_fingerprint(norm)
     wn = "zw_" + fp
@@ -1104,12 +1139,8 @@ async def _spend_once(session, req: SpendReq):
         save_sessions()
         return txid
     finally:
-        # Drop the spend capability immediately, whatever happened above.
-        wallet_keys.pop(wn, None)
-        try:
-            await aseal(wn)
-        except Exception:
-            pass
+        # Whatever happened, the window restarts from now, and never outlives it.
+        spend_windows[wn] = time.time() + SPEND_WINDOW_SEC
 
 @app.post("/api/wallet/send_with_seed")
 async def send_with_seed(req: SpendReq, session=Depends(get_session)):
@@ -1127,7 +1158,8 @@ async def send_with_seed(req: SpendReq, session=Depends(get_session)):
         fee_totals[wn] = fee_totals.get(wn, 0) + fee_zats
         save_fee_totals()
     wallet_cache.pop(session["wallet_name"], None)
-    return {"txid": txid, "fee_zats": fee_zats, "fee_zec": fee_zats / 1e8}
+    return {"txid": txid, "fee_zats": fee_zats, "fee_zec": fee_zats / 1e8,
+            "unlocked_minutes": SPEND_WINDOW_SEC // 60}
 
 async def _apply_fees(session, kind, outputs):
     """Add the same fee output, and the same padding, that the seed-session
@@ -1277,8 +1309,11 @@ async def logout_wallet(request: Request, session=Depends(get_session)):
     """Drop this session and seal the wallet if no other session uses it."""
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     wn = session.get("wallet_name", "")
+    spend_wn = session.get("spend_wallet")
     sessions.pop(token, None)
     save_sessions()
+    if spend_wn and spend_wn not in _live_wallets() and spend_wn in spend_windows:
+        await lock_spend_wallet(spend_wn)   # signing out closes the window now
     sealed = False
     if wn and wn not in _live_wallets():
         sealed = await aseal(wn)

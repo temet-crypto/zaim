@@ -161,3 +161,27 @@ class TestStatus:
         answers[("balance",)] = {"total_orchard_balance": 15_000}
         st = run(m.migration_status(seed_session("zw_7777777777777777")))
         assert st["needed"] is False
+
+
+class TestSpendWindow:
+    """View-key sends keep the spend wallet open for a window (Dusty's call,
+    2026-09-27), then seal it. Signing out seals it at once."""
+
+    def test_the_window_closes_and_seals(self, monkeypatch):
+        sealed = []
+
+        async def fake_seal(wn):
+            sealed.append(wn)
+            return True
+
+        monkeypatch.setattr(m, "aseal", fake_seal)
+        wn = "zw_8888888888888888"
+        os.makedirs(os.path.join(m.WDIR, wn), exist_ok=True)
+        m.wallet_keys[wn] = b"k" * 32
+        m.spend_windows[wn] = 0          # already lapsed
+        run(m.lock_spend_wallet(wn))
+        assert sealed == [wn]
+        assert wn not in m.spend_windows and wn not in m.wallet_keys
+
+    def test_default_window_is_ten_minutes(self):
+        assert m.SPEND_WINDOW_SEC == 600

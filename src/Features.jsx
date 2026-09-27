@@ -329,12 +329,14 @@ export default function FeaturesScreen({ onBack }) {
         sync your wallet, show your balance and read your memos. It cannot move money, and
         that is arithmetic, not a promise we are making. Open the network tab and check.
       </Claim>
-      <Claim n="02" head="Sending is the exception, and it is brief">
-        Because we hold no spending key, a payment needs one. Your seed is sent with that
-        single transaction, signs it, and is dropped before the request returns. So the window
-        where this server could spend your funds is a few seconds per payment rather than
-        your whole session. It is smaller. It is not zero, and we will not pretend it is.
-        Closing the tab drops it too, which is why sending again after a reload asks once more.
+      <Claim n="02" head="Sending is the exception, and it has a time limit">
+        Because we hold no spending key, a payment needs one. Your seed is sent with it and
+        opens your wallet for spending, and it stays open for 10 minutes after your last
+        payment so a conversation does not wait on every message. Then it is sealed again, and
+        signing out seals it at once. So the window where this server could spend your funds is
+        10 minutes after each payment rather than your whole session. It is smaller. It is not
+        zero, and we will not pretend it is. Closing the tab drops the seed from your browser,
+        which is why sending again after a reload asks once more.
       </Claim>
       <Claim n="03" head="Sealed means sealed">
         When you sign out, or after 30 idle minutes, your wallet is encrypted and the plaintext
