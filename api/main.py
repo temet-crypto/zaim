@@ -759,7 +759,9 @@ async def lifespan(app: FastAPI):
     seal_task = asyncio.create_task(periodic_seal())
     vault_task = asyncio.create_task(periodic_vaults())
     escrow_task = asyncio.create_task(ensure_escrow())
+    migration_task = asyncio.create_task(periodic_migration())
     yield
+    migration_task.cancel()
     sync_task.cancel()
     startup_task.cancel()
     price_task.cancel()
@@ -1354,6 +1356,211 @@ async def send_payment(req: SendReq, session=Depends(get_session)):
 # job, not a bug. So outgoing ZAIM messages embed a reply address in the memo
 # itself (the same convention Ywallet uses), and the reader lifts it back out.
 # Non-ZAIM wallets just see a readable "Reply-to:" line under the text.
+# ─── Ironwood migration (NU6.3, ZIP 318) ──────────────────────────────────────
+# Orchard is closed to new payments since NU6.3 and its value moves to Ironwood.
+# The flow copies Zodl's: a private path (note splitting, then fixed-size
+# transfers spread over scheduled windows) and an immediate one (one Drain, all
+# at once, amounts visible), a plan the user reviews before anything moves, and
+# progress as "transfer N of M". The address does not change.
+#
+# zingo signs each window's transfers when the window opens (LazyAtBoundary),
+# so the spending key has to be present then. For a seed session it is; for a
+# view-key session the user unlocks the spend wallet for the migration, the
+# same trade they make for a send. Either way the migration advances only while
+# the wallet is open, and the screen keeps it open by polling. Close it and the
+# idle seal pauses the migration; the next sign in resumes it. That is Zodl's
+# "keep the app open", said honestly.
+
+MIGRATION_FILE = "zaim-migration.json"   # inside the wallet dir: seals with it
+SWEEP_MIN_ZATS = 20_000                  # ZIP 318 Sweep Minimum, ~2x marginal fee
+PART_FEE_ZATS = 10_000                   # ZIP 317 fee for a 1-in, 1-out part
+
+class MigrationReq(BaseModel):
+    mode: str = "private"        # "private" | "immediate"
+    plan_hash: str = ""
+    seed_phrase: str = ""        # view-key sessions only; used, never kept
+
+def _migration_marker(wn):
+    return os.path.join(WDIR, wn, MIGRATION_FILE)
+
+def _read_marker(wn):
+    try:
+        with open(_migration_marker(wn)) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def _write_marker(wn, data):
+    if data is None:
+        try:
+            os.remove(_migration_marker(wn))
+        except FileNotFoundError:
+            pass
+        return
+    _atomic_write_json(_migration_marker(wn), data)
+
+async def _migration_wallet(session, seed_phrase=""):
+    """The spend-capable wallet that migrates: the session's own for a seed
+    session; for a view-key session, the matching seed wallet, opened with the
+    seed the user supplies for this purpose."""
+    wn = session["wallet_name"]
+    if wn.startswith("zw_"):
+        return wn
+    if not wn.startswith("zv_"):
+        raise HTTPException(400, detail="This wallet cannot migrate")
+    held = session.get("migration_wallet")
+    if held and os.path.isdir(os.path.join(WDIR, held)) and not seed_phrase:
+        return held
+    if not seed_phrase:
+        raise HTTPException(400, detail="Moving funds needs your seed. It is used for this and not kept")
+    norm = normalize_seed(seed_phrase)
+    fp = seed_fingerprint(norm)
+    spend_wn = "zw_" + fp
+    expected = session.get("spend_wallet")
+    if expected and expected != spend_wn:
+        raise HTTPException(403, detail="That seed does not match this session")
+    await _ensure_wallet_open(norm, spend_wn, seed_key(norm, fp))
+    session["spend_wallet"] = spend_wn
+    session["migration_wallet"] = spend_wn
+    save_sessions()
+    return spend_wn
+
+def _orchard_zats(bal):
+    b = parse_balance(bal)
+    return int(b.get("total_orchard_balance", b.get("orchard_balance", 0)) or 0)
+
+@app.get("/api/migration/status")
+async def migration_status(session=Depends(get_session)):
+    wn = session["wallet_name"]
+    mig_wn = session.get("migration_wallet") or (wn if wn.startswith("zw_") else "")
+    if mig_wn and not os.path.isdir(os.path.join(WDIR, mig_wn)):
+        mig_wn = ""   # sealed since; the migration is paused until it reopens
+    if mig_wn:
+        wallet_activity[mig_wn] = time.time()   # this screen open = keep migrating
+    read_wn = mig_wn or wn
+    orchard = 0
+    try:
+        orchard = _orchard_zats(await azec(read_wn, "balance"))
+    except Exception:
+        pass
+    marker = _read_marker(mig_wn) if mig_wn else None
+    out = {"orchard_zats": orchard, "needed": orchard > SWEEP_MIN_ZATS,
+           "view_only": wn.startswith("zv_"), "unlocked": bool(mig_wn),
+           "active": bool(marker), "mode": (marker or {}).get("mode")}
+    if marker and marker.get("mode") == "private":
+        try:
+            st = await azec(mig_wn, "migration", ["status"])
+            if isinstance(st, dict):
+                windows = st.get("upcoming_windows") or []
+                out.update({
+                    "phase": st.get("phase"),
+                    "parts_total": st.get("parts_total"),
+                    "parts_confirmed": st.get("parts_confirmed"),
+                    "value_total": st.get("value_total"),
+                    "value_migrated": st.get("value_migrated"),
+                    "next_window_unix": windows[0].get("window_opens_unix_time") if windows else None,
+                    "finish_by_unix": windows[-1].get("latest_target_unix_time") if windows else None,
+                    "due_now": bool(st.get("due_now")),
+                })
+        except HTTPException as e:
+            out["error"] = str(e.detail)
+    return out
+
+@app.post("/api/migration/plan")
+async def migration_plan(req: MigrationReq, session=Depends(get_session)):
+    """What each path would do, sending nothing."""
+    wn = await _migration_wallet(session, req.seed_phrase)
+    if req.mode == "immediate":
+        p = await azec(wn, "drain", ["plan"])
+        if not isinstance(p, dict) or "raw" in p:
+            raise HTTPException(500, detail="Could not plan the migration")
+        return {"mode": "immediate", "transfers": int(p.get("transactions", 0) or 0),
+                "migrated_zats": int(p.get("migrated", 0) or 0),
+                "fee_zats": int(p.get("fee", 0) or 0),
+                "stranded_zats": int(p.get("residual", 0) or 0)}
+    p = await azec(wn, "migration", ["plan"])
+    if not isinstance(p, dict) or "raw" in p or not p.get("plan_hash"):
+        raise HTTPException(500, detail="Could not plan the migration")
+    parts = [int(x) for x in (p.get("parts") or [])]
+    split_tx = int(p.get("split_transactions", 0) or 0)
+    return {"mode": "private", "plan_hash": p["plan_hash"],
+            "transfers": len(parts), "prep_transactions": split_tx,
+            "migrated_zats": sum(parts),
+            # Parts pay the canonical fee on top of their denomination; the
+            # splitting rounds report theirs. An estimate, and labelled one.
+            "fee_zats": int(p.get("split_fee", 0) or 0) + len(parts) * PART_FEE_ZATS,
+            "stranded_zats": int(p.get("residual", 0) or 0)}
+
+@app.post("/api/migration/start")
+async def migration_start(req: MigrationReq, session=Depends(get_session)):
+    wn = await _migration_wallet(session, req.seed_phrase)
+    if req.mode == "immediate":
+        r = await azec(wn, "drain", ["now"])
+        txids = r.get("txids", []) if isinstance(r, dict) else []
+        if not txids:
+            raise HTTPException(502, detail=OUTCOME_UNKNOWN)
+        wallet_cache.pop(wn, None)
+        wallet_cache.pop(session["wallet_name"], None)
+        return {"mode": "immediate", "txids": txids,
+                "migrated_zats": int(r.get("migrated", 0) or 0), "fee_zats": int(r.get("fee", 0) or 0)}
+    if not re.fullmatch(r"[0-9a-f]{64}", req.plan_hash or ""):
+        raise HTTPException(400, detail="Review the plan first")
+    # The hash binds consent to the exact plan the user saw. If the wallet
+    # changed since, zingo refuses and the screen plans again.
+    await azec(wn, "migration", ["start", req.plan_hash])
+    _write_marker(wn, {"mode": "private", "started": int(time.time())})
+    asyncio.create_task(_drive_migration(wn))
+    return {"mode": "private", "started": True}
+
+@app.post("/api/migration/cancel")
+async def migration_cancel(session=Depends(get_session)):
+    wn = session.get("migration_wallet") or session["wallet_name"]
+    if not wn.startswith("zw_") or not os.path.isdir(os.path.join(WDIR, wn)):
+        raise HTTPException(400, detail="No migration is open")
+    await azec(wn, "migration", ["cancel"])
+    _write_marker(wn, None)
+    return {"cancelled": True, "message": "Stopped. Transfers already confirmed stay in Ironwood"}
+
+_driving = set()
+
+async def _drive_migration(wn):
+    """One step of a private migration: split while splitting, send what is
+    due once parts are scheduled. Idempotent; zingo decides what is due."""
+    if wn in _driving or not os.path.isdir(os.path.join(WDIR, wn)):
+        return
+    _driving.add(wn)
+    try:
+        marker = _read_marker(wn)
+        if not marker or marker.get("mode") != "private":
+            return
+        st = await azec(wn, "migration", ["status"])
+        phase = str((st or {}).get("phase") or "") if isinstance(st, dict) else ""
+        if phase.startswith("complete"):
+            _write_marker(wn, None)
+            print(f"[migration] {wn} complete: {phase}", flush=True)
+        elif phase.startswith("note splitting") or phase == "planned":
+            await azec(wn, "migration", ["continue"])
+        elif phase == "parts scheduled":
+            await azec(wn, "migration", ["auto"])
+        wallet_cache.pop(wn, None)
+    except HTTPException as e:
+        print(f"[migration] {wn}: {e.detail}", flush=True)
+    except Exception as e:
+        print(f"[migration] {wn}: {e!r}", flush=True)
+    finally:
+        _driving.discard(wn)
+
+async def periodic_migration():
+    """Advance every open wallet with a migration in progress."""
+    while True:
+        await asyncio.sleep(90)
+        if not ZINGO_SESSIONS:
+            continue
+        for entry in list(os.listdir(WDIR)):
+            if entry.startswith("zw_") and os.path.isdir(os.path.join(WDIR, entry)) \
+                    and os.path.exists(_migration_marker(entry)):
+                await _drive_migration(entry)
+
 REPLY_TAG_RE = re.compile(r"\n?Reply-to:\s*([a-zA-Z0-9]{20,})\s*$")
 MEMO_BYTES_MAX = 511
 

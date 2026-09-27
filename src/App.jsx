@@ -7,6 +7,7 @@ import { T, F, MAXPAIN_CSS } from "./styles/maxpain.js";
 import { apiGet, apiPost, takeNotice } from "./api.js";
 import AiTab from "./AiTab.jsx";
 import Inscriptions from "./Inscriptions.jsx";
+import Ironwood from "./Ironwood.jsx";
 import { deriveAiMnemonic, deriveStoreKey } from "./ai/derive.js";
 import { ufvkFromSeed, prewarm as prewarmKeys } from "./ai/ufvk.js";
 import { holdSeed, takeSeed, canSpend, forgetSeed } from "./ai/spendkey.js";
@@ -355,6 +356,12 @@ function HomeScreen({ onNav }) {
   useEffect(() => {
     apiGet("/inscriptions/status").then(s => setInscriptionsOn(!!s.enabled)).catch(() => {});
   }, []);
+  // Orchard funds to move, or a migration running: say so on the first screen,
+  // the way Zodl prompts. Dismissable only by leaving; it returns next visit.
+  const [migration, setMigration] = useState(null);
+  useEffect(() => {
+    apiGet("/migration/status").then(setMigration).catch(() => {});
+  }, []);
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
@@ -449,6 +456,14 @@ function HomeScreen({ onNav }) {
         <button className="mp-btn" style={{ fontSize: 13, padding: "15px 4px", borderRight: `2px solid ${T.black}`, borderLeft: "none", borderTop: "none", borderBottom: "none", background: T.blue }} onClick={() => onNav("swap")}>SWAP</button>
         <button className="mp-btn ghost" style={{ fontSize: 13, padding: "15px 4px", border: "none" }} onClick={() => { if (address) { navigator.clipboard?.writeText(address); setToast("Address copied"); setTimeout(() => setToast(""), 1800); } }}>COPY</button>
       </div>
+      {migration && (migration.needed || migration.active) && (
+        <button className="mp-btn" onClick={() => onNav("ironwood")}
+          style={{ fontSize: 14, padding: "15px 16px", width: "100%", border: "none", borderBottom: `2px solid ${T.black}`, background: T.blue, color: T.white, textAlign: "left" }}>
+          {migration.active
+            ? (migration.parts_total ? `MOVING TO IRONWOOD, ${migration.parts_confirmed || 0} OF ${migration.parts_total} DONE` : "MOVING TO IRONWOOD")
+            : `MOVE ${(migration.orchard_zats / 1e8).toFixed(4)} ZEC TO IRONWOOD`}
+        </button>
+      )}
       {inscriptionsOn && (
         <button className="mp-btn ghost" style={{ fontSize: 13, padding: "15px 4px", width: "100%", border: "none", borderBottom: `2px solid ${T.black}` }} onClick={() => onNav("inscriptions")}>INSCRIPTIONS</button>
       )}
@@ -960,6 +975,7 @@ export default function ZaimApp() {
       case "chat": return chatContact ? <ChatScreen contact={chatContact} onBack={() => setScreen("messages")} /> : null;
       case "geo": return <ZAIMGeoVault />;
       case "ai": return <AiTab aiReady={true} storeKey={aiStoreKey} />;
+      case "ironwood": return <Ironwood onBack={() => setScreen("home")} />;
       case "inscriptions": return <Inscriptions onBack={() => setScreen("home")} viewOnly={viewOnly()} />;
       case "settings": return <SettingsScreen onLogout={logout} onAdmin={handleLogoTap} />;
       case "admin": return <AdminDashboard onExit={() => setScreen("settings")} />;
