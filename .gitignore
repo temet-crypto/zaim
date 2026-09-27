@@ -7,6 +7,7 @@ certbot/
 *.log
 .env*
 zingo-cli
+nym-proxy
 __pycache__/
 *.pyc
 *.pem

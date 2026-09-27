@@ -1,0 +1,163 @@
+diff --git a/zingo-cli/src/commands.rs b/zingo-cli/src/commands.rs
+index c5a4938..c55ae05 100644
+--- a/zingo-cli/src/commands.rs
++++ b/zingo-cli/src/commands.rs
+@@ -178,7 +178,9 @@ async fn addresses(lightclient: &mut LightClient) -> Result<String, CommandError
+ 
+ async fn balance(lightclient: &mut LightClient) -> Result<String, CommandError> {
+     match lightclient.account_balance(zip32::AccountId::ZERO).await {
+-        Ok(bal) => Ok(bal.to_string()),
++        // ZAIM patch: JSON, as `messages` already prints. The Display form is
++        // for people; a caller that parses output needs a stable shape.
++        Ok(bal) => Ok(json::JsonValue::from(bal).pretty(JSON_INDENT)),
+         Err(e) => Err(not_yet_typed(e)),
+     }
+ }
+@@ -933,7 +935,8 @@ async fn value_to_address(lightclient: &mut LightClient) -> Result<String, Comma
+ 
+ async fn value_transfers(lightclient: &mut LightClient) -> Result<String, CommandError> {
+     match lightclient.value_transfers(false).await {
+-        Ok(value_transfers) => Ok(value_transfers.to_string()),
++        // ZAIM patch: JSON, the same shape `messages` prints.
++        Ok(value_transfers) => Ok(json::JsonValue::from(value_transfers).pretty(JSON_INDENT)),
+         Err(e) => Err(not_yet_typed(e)),
+     }
+ }
+diff --git a/zingo-cli/src/lib.rs b/zingo-cli/src/lib.rs
+index a380399..f1db45e 100644
+--- a/zingo-cli/src/lib.rs
++++ b/zingo-cli/src/lib.rs
+@@ -570,6 +570,25 @@ fn start_interactive(cli_config: &CliConfigTemplate, ch: CommandChannel) -> Exit
+         ChainType::Regtest(_) => "regtest",
+     };
+ 
++    // ZAIM patch: ZINGO_FRAMED=1 is for a program driving this prompt over
++    // pipes. Each line read ends in exactly one frame line on stdout, `ok` or
++    // `err`, and errors move to stdout ahead of it, so a caller can read one
++    // complete reply per command instead of guessing when output has stopped.
++    let framed = std::env::var("ZINGO_FRAMED").is_ok_and(|v| v == "1");
++    let end = |ok: bool| {
++        if framed {
++            println!("\u{1e}ZINGO-END {}", if ok { "ok" } else { "err" });
++        }
++    };
++    let fail = |rendered: &str| {
++        if framed {
++            println!("{rendered}");
++        } else {
++            eprintln!("{rendered}");
++        }
++        end(false);
++    };
++
+     loop {
+         let prompt_status = send_request(Request::PromptIndicator).unwrap_or_default();
+ 
+@@ -583,18 +602,19 @@ fn start_interactive(cli_config: &CliConfigTemplate, ch: CommandChannel) -> Exit
+                 }
+                 // Parse command line arguments
+                 let Ok(tokens) = shellwords::split(&line) else {
+-                    println!("Mismatched Quotes");
++                    fail("Mismatched Quotes");
+                     continue;
+                 };
+ 
+                 if tokens.is_empty() {
++                    end(true);
+                     continue;
+                 }
+ 
+                 let command = match commands::parse_command_tokens(&tokens) {
+                     Ok(command) => command,
+                     Err(rendered) => {
+-                        eprintln!("{rendered}");
++                        fail(&rendered.to_string());
+                         continue;
+                     }
+                 };
+@@ -602,6 +622,7 @@ fn start_interactive(cli_config: &CliConfigTemplate, ch: CommandChannel) -> Exit
+                 // CLI-only commands that don't need the LightClient.
+                 if matches!(command, commands::CliCommand::Servers) {
+                     println!("{}", format_ranked_servers(cli_config));
++                    end(true);
+                     continue;
+                 }
+ 
+@@ -609,8 +630,11 @@ fn start_interactive(cli_config: &CliConfigTemplate, ch: CommandChannel) -> Exit
+                 let is_quit = matches!(command, commands::CliCommand::Quit);
+ 
+                 match send_request(Request::Command(command)) {
+-                    Ok(output) => println!("{output}"),
+-                    Err(rendered) => eprintln!("{rendered}"),
++                    Ok(output) => {
++                        println!("{output}");
++                        end(true);
++                    }
++                    Err(rendered) => fail(&rendered.to_string()),
+                 }
+ 
+                 if is_quit {
+diff --git a/zingolib/src/destination.rs b/zingolib/src/destination.rs
+index d1c5907..4fa95c9 100644
+--- a/zingolib/src/destination.rs
++++ b/zingolib/src/destination.rs
+@@ -178,6 +178,22 @@ pub(crate) fn eligible_destinations(
+     sync_indexer: Option<&Uri>,
+     health: &health::Health,
+ ) -> Result<Vec<Uri>, NoEligibleDestinations> {
++    // ZAIM patch: ZINGO_DESTINATIONS (comma separated URIs) replaces the
++    // curated list, which is mainnet only, so on testnet every send went to a
++    // mainnet indexer and was refused as "unknown Ironwood anchor". An explicit
++    // list is the caller's own choice and is used as given, including an
++    // endpoint run by the sync operator: testnet has only one operator. Unset,
++    // behavior is upstream's.
++    if let Ok(list) = std::env::var("ZINGO_DESTINATIONS") {
++        let pool: Vec<Uri> = list
++            .split(',')
++            .filter_map(|entry| entry.trim().parse().ok())
++            .collect();
++        if pool.is_empty() {
++            return Err(NoEligibleDestinations::EmptyPool);
++        }
++        return Ok(pool);
++    }
+     let candidates = destination_indexers();
+     if candidates.is_empty() {
+         return Err(NoEligibleDestinations::EmptyPool);
+diff --git a/zingolib/src/wallet/send.rs b/zingolib/src/wallet/send.rs
+index 35c8966..084f686 100644
+--- a/zingolib/src/wallet/send.rs
++++ b/zingolib/src/wallet/send.rs
+@@ -72,13 +72,31 @@ impl LightWallet {
+         let sapling_prover =
+             zcash_proofs::prover::LocalTxProver::from_bytes(&sapling_spend, &sapling_output);
+ 
++        // OVK policy. `Sender` attaches an outgoing viewing key so this wallet
++        // can later decrypt its own outgoing notes, which is what shows a user
++        // their sent history — the right default, and why it stays the default.
++        //
++        // A service that answers other people does not want it. With `Sender`,
++        // anyone who ever obtains that wallet's viewing key can read every memo
++        // it sent, to whom, forever; the sender's own key becomes a standing
++        // decryption oracle over its whole outbox. `Discard` writes no OVK, so
++        // an outgoing note is unreadable even to the wallet that created it.
++        //
++        // Opt in with ZINGO_OVK_DISCARD=1, and understand the cost: that wallet
++        // permanently loses the ability to read its own send history.
++        let ovk_policy = if std::env::var("ZINGO_OVK_DISCARD").is_ok_and(|v| v == "1") {
++            zcash_client_backend::wallet::OvkPolicy::Discard
++        } else {
++            zcash_client_backend::wallet::OvkPolicy::Sender
++        };
++
+         zcash_client_backend::data_api::wallet::create_proposed_transactions(
+             self,
+             &chain_type,
+             &sapling_prover,
+             &sapling_prover,
+             &SpendingKeys::new(usk),
+-            zcash_client_backend::wallet::OvkPolicy::Sender,
++            ovk_policy,
+             &proposal,
+             None,
+         )

@@ -27,6 +27,11 @@ from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from concurrent.futures import ThreadPoolExecutor
+try:
+    from api import zingo_session as zs
+except ImportError:  # run from inside api/
+    import zingo_session as zs
 
 CLI = os.getenv("ZAIM_CLI", os.getenv("ZECWALLET_CLI", "/app/zingo-cli"))
 SERVER = os.getenv("LIGHTWALLETD_SERVER", "https://zec.rocks:443")
@@ -158,6 +163,11 @@ def seal_wallet(wn, key=None):
     if not os.path.isdir(wdir):
         return False
     key = key or wallet_keys.get(wn)
+    if not key and not os.path.exists(sealed):
+        print(f"[seal] no key and no prior seal for {wn}; leaving plaintext", flush=True)
+        return False
+    if not close_session(wn):
+        return False   # still running: sealing now would tar a file mid-write
     if key:
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as t:
@@ -170,9 +180,6 @@ def seal_wallet(wn, key=None):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, sealed)
-    elif not os.path.exists(sealed):
-        print(f"[seal] no key and no prior seal for {wn}; leaving plaintext", flush=True)
-        return False
     shutil.rmtree(wdir, ignore_errors=True)
     wallet_keys.pop(wn, None)
     wallet_activity.pop(wn, None)
@@ -330,6 +337,34 @@ if TOR_SOCKS:
 def cli_prefix():
     return ["torsocks"] if TOR_SOCKS else []
 
+# ── Long-lived zingo sessions (zingo v6, Ironwood) ──────────────────────────────
+# v6 transmits only over the Nym mixnet, and the mixnet costs ~2 minutes per
+# process to come up, so ZAIM keeps ONE interactive zingo process per open
+# wallet instead of one process per command. See api/zingo_session.py for the
+# protocol and the rules (never kill a session; one writer per wallet file).
+# Off = the v0.x one-process-per-command path, for the pre-Ironwood binary.
+ZINGO_SESSIONS = os.getenv("ZAIM_ZINGO_SESSIONS", "") == "1"
+NYM_PROXY = os.getenv("ZAIM_NYM_PROXY", "")
+POOL = zs.Pool()
+# Session calls block a thread for as long as zingo takes, and the first call
+# on a new session waits out the mixnet bootstrap. The default executor has
+# cpu+4 threads (5 on this box), which a few sign-ins would exhaust.
+CLI_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("ZAIM_CLI_THREADS", "32")),
+                                  thread_name_prefix="zingo")
+# Answerable from the wallet file alone. With no live session these run as a
+# one-shot `--offline` process, about a second, instead of starting the mixnet.
+OFFLINE_OK = {"addresses", "t_addresses", "balance", "spendable_balance", "height",
+              "notes", "value_transfers", "messages", "recovery_info", "birthday",
+              "export_ufvk", "new_address", "new_taddress", "wallet_kind"}
+# Reads a session that is still bootstrapping can answer from the last offline
+# read instead of making the caller wait out the bootstrap.
+SNAPSHOT_READS = {"addresses", "t_addresses", "balance", "spendable_balance", "height",
+                  "notes", "value_transfers", "messages"}
+offline_snapshots = {}   # wn -> {(command, args): result}
+SPEND_COMMANDS = {"quicksend", "confirm", "quickshield", "transmit", "drain", "migrate"}
+OUTCOME_UNKNOWN = ("The network did not confirm this transaction, but it may still go through. "
+                   "Check your transactions before sending again")
+
 def wallet_env(wallet_name):
     """Per-wallet isolation: zingo-cli takes an explicit --data-dir, so every
     wallet lives in its own directory (zingo-wallet.dat and logs inside)."""
@@ -391,6 +426,78 @@ def zec(wallet_name, command, args=None):
     except FileNotFoundError:
         raise HTTPException(503, detail="CLI not found")
 
+def _zec_offline(wn, command, args=None, extra=None):
+    """One-shot `--offline` run. Only ever called with no live session on this
+    wallet (the caller holds the wallet lock): two zingo processes on one
+    wallet file is how a wallet gets corrupted."""
+    wdir, env = wallet_env(wn)
+    cmd = [CLI, "--chain", CHAIN_NAME, "--offline", "--data-dir", wdir] + (extra or []) + [command]
+    if args:
+        cmd.extend([str(a) for a in args])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, detail="Timeout")
+    except FileNotFoundError:
+        raise HTTPException(503, detail="CLI not found")
+    out = _clean_cli_output(r.stdout.strip())
+    if r.returncode != 0:
+        err = r.stderr.strip() or out
+        print(f"[zec-offline] {wn} {command} rc={r.returncode}: {_safe_cli_error(err)}", flush=True)
+        raise HTTPException(500, detail="CLI error: " + _safe_cli_error(err))
+    res = zs.parse(out)
+    if command in SNAPSHOT_READS:
+        offline_snapshots.setdefault(wn, {})[(command, tuple(str(a) for a in (args or [])))] = res
+    return res
+
+def _start_session(wn, extra=None, extra_env=None):
+    wdir, env = wallet_env(wn)
+    if extra_env:
+        env.update(extra_env)
+    argv = cli_prefix() + [CLI, "--chain", CHAIN_NAME, "--server", wallet_server(wn),
+                           "--data-dir", wdir]
+    if NYM_PROXY:
+        argv += ["--nym-proxy", NYM_PROXY]
+    s = POOL.start(wn, argv + (extra or []), env)
+    print(f"[session] {wn} started pid={s.proc.pid}", flush=True)
+    return s
+
+def _zec_in_session(s, wn, command, args=None):
+    if command == "save":
+        return {"raw": ""}   # a live session saves itself; `quit` saves on close
+    if not s.ready and command in SNAPSHOT_READS:
+        snap = offline_snapshots.get(wn, {}).get((command, tuple(str(a) for a in (args or []))))
+        if snap is not None:
+            return snap
+    try:
+        return s.run(command, args, timeout=300 if s.ready else 600)
+    except zs.CommandFailed as e:
+        text = str(e)
+        print(f"[session] {wn} {command}: {_SEED_SHAPE.sub('[redacted]', text)[:600]}", flush=True)
+        if command in SPEND_COMMANDS and "Transmission" in text:
+            # Built, signed, and handed to the mixnet, but no indexer confirmed
+            # it. Seen on testnet: this error, and the transaction mined anyway.
+            # Reporting it as a failure invites a retry that pays twice.
+            raise HTTPException(502, detail=OUTCOME_UNKNOWN)
+        raise HTTPException(500, detail="CLI error: " + _safe_cli_error(text))
+    except zs.CommandTimeout:
+        raise HTTPException(504, detail="Timeout")
+    except zs.SessionDead:
+        tail = " | ".join(list(s.stderr_tail)[-5:])
+        print(f"[session] {wn} died: {_safe_cli_error(tail)}", flush=True)
+        raise HTTPException(503, detail="The wallet engine restarted. Try again")
+
+def close_session(wn):
+    """Quit a wallet's session so zingo saves and releases the file. False if
+    it would not quit; the caller must then leave the wallet alone."""
+    offline_snapshots.pop(wn, None)
+    if not ZINGO_SESSIONS:
+        return True
+    ok = POOL.close(wn, 120)
+    if not ok:
+        print(f"[session] {wn} did not quit; leaving it running", flush=True)
+    return ok
+
 wallet_locks = {}
 _restore_sem = None
 
@@ -411,11 +518,37 @@ async def azec(wn, cmd, args=None):
     never touched: without this, an in-flight background task could recreate
     a plaintext dir right after sealing (the CLI makes a FRESH wallet in any
     empty HOME it is pointed at)."""
+    loop = asyncio.get_event_loop()
+    if not ZINGO_SESSIONS:
+        async with _wlock(wn):
+            if wn.startswith(("zw_", "zai_", "zv_")) and not os.path.isdir(os.path.join(WDIR, wn)):
+                raise HTTPException(409, detail="wallet is sealed")
+            return await loop.run_in_executor(None, zec, wn, cmd, args)
+    # Session mode. The lock covers only the routing decision and offline
+    # one-shots; a live session orders its own commands, so a slow send does
+    # not hold every read of the same wallet hostage.
     async with _wlock(wn):
         if wn.startswith(("zw_", "zai_", "zv_")) and not os.path.isdir(os.path.join(WDIR, wn)):
             raise HTTPException(409, detail="wallet is sealed")
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, zec, wn, cmd, args)
+        s = POOL.get(wn)
+        if s is None:
+            if cmd in OFFLINE_OK or cmd == "save":
+                if cmd == "save":
+                    return {"raw": ""}
+                return await loop.run_in_executor(CLI_EXECUTOR, _zec_offline, wn, cmd, args)
+            s = await loop.run_in_executor(CLI_EXECUTOR, _start_session, wn)
+    return await loop.run_in_executor(CLI_EXECUTOR, _zec_in_session, s, wn, cmd, args)
+
+async def prime_offline(wn):
+    """Read what a sign in shows straight from the wallet file, before the
+    session starts, so the first screen does not wait out the mixnet."""
+    if not ZINGO_SESSIONS or POOL.get(wn):
+        return
+    for cmd in ("balance", "value_transfers"):
+        try:
+            await azec(wn, cmd)
+        except Exception:
+            pass
 
 async def aseal(wn):
     """Seal under the same lock so we wait out any in-flight CLI call."""
@@ -432,7 +565,7 @@ def parse_balance(raw):
         for k, v in raw.items():
             # numeric balances -> int; leave bools, strings and nested lists alone
             result[k] = int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
-        return result
+        return _alias_balance(result)
     out = raw if isinstance(raw, str) else raw.get("raw", "")
     result = {}
     for line in out.split("\n"):
@@ -447,13 +580,29 @@ def parse_balance(raw):
                 result[key] = val
     # zingo reports per pool as confirmed_/unconfirmed_/total_; alias to the
     # canonical names the frontend reads.
-    for pool in ("sapling", "transparent", "orchard"):
+    return _alias_balance(result)
+
+def _alias_balance(result):
+    # zingo reports per pool as confirmed_/unconfirmed_/total_; alias to the
+    # canonical names the frontend reads. v6 reports None for a pool it has no
+    # value in.
+    for k, v in list(result.items()):
+        if v is None and k.endswith("_balance"):
+            result[k] = 0
+    for pool in ("sapling", "transparent", "orchard", "ironwood"):
         ck = f"confirmed_{pool}_balance"
         if ck in result:
             result.setdefault(f"{pool}_balance", result[ck])
+    # Orchard is closed to new payments since NU6.3 and its value is on its way
+    # to Ironwood, so for "how much can I spend privately" they are one number.
+    result["shielded_balance"] = sum(int(result.get(f"{p}_balance", 0) or 0)
+                                     for p in ("sapling", "orchard", "ironwood"))
     return result
 
 def parse_transactions(raw):
+    # zingo v6 prints {"value_transfers": [...]} (with ZAIM's JSON patch).
+    if isinstance(raw, dict) and isinstance(raw.get("value_transfers"), list):
+        return raw["value_transfers"]
     out = raw if isinstance(raw, str) else raw.get("raw", "")
     txns = []
     current = None
@@ -498,6 +647,8 @@ def extract_t_addr(t_result):
                 return a.get("encoded_address", "")
     return ""
 
+chain_tip = {"height": 0}   # highest height any session has reported
+
 async def sync_and_cache(wallet_name):
     # Never operate on a wallet that is sealed or gone: the CLI would
     # silently create a FRESH wallet in an empty HOME (post-logout race).
@@ -507,6 +658,13 @@ async def sync_and_cache(wallet_name):
         await azec(wallet_name, "sync", ["run"])
         bal = await azec(wallet_name, "balance")
         parsed_bal = parse_balance(bal)
+        if ZINGO_SESSIONS:
+            try:
+                h = await azec(wallet_name, "height")
+                if isinstance(h, dict) and int(h.get("height", 0) or 0) > chain_tip.get("height", 0):
+                    chain_tip["height"] = int(h["height"])
+            except Exception:
+                pass
         txs = await azec(wallet_name, "value_transfers")
         parsed_txs = txs if isinstance(txs, list) else parse_transactions(txs)
         await azec(wallet_name, "save")
@@ -608,6 +766,10 @@ async def lifespan(app: FastAPI):
     seal_task.cancel()
     vault_task.cancel()
     escrow_task.cancel()
+    # Quit every session so each wallet is saved. Never kill (zingo_session.py).
+    loop = asyncio.get_event_loop()
+    await asyncio.gather(*[loop.run_in_executor(CLI_EXECUTOR, POOL.close, n, 60)
+                           for n in POOL.names()], return_exceptions=True)
 
 app = FastAPI(title="ZAIM API", version="0.9.2", lifespan=lifespan)
 # The SPA is served same-origin (nginx proxies /api), so CORS is belt-and-braces.
@@ -673,6 +835,8 @@ async def health():
             "inscriptions": bool(ZORD_URL and ZORD_TOKEN and TREASURY_ADDRESS),
             "server": SERVER, "cli_available": cli_ok, "wallets_active": active,
             "wallets_sealed": sealed, "wallets": active + sealed, "sessions": len(sessions),
+            "engine": "sessions" if ZINGO_SESSIONS else "per-command",
+            "engine_sessions": len(POOL.names()) if ZINGO_SESSIONS else 0,
             # Disclosed so the UI can show the fee BEFORE a payment is sent.
             # A fee nobody mentions is a fee nobody agreed to.
             "fee_bps": FEE_BPS if FEE_ADDRESS else 0}
@@ -717,16 +881,19 @@ async def _read_addresses(wn):
     z = t = ua = ""
     try:
         t = extract_t_addr(await azec(wn, "t_addresses"))
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[addresses] {wn} t_addresses: {e!r}"[:300], flush=True)
     try:
-        z = _addr_from_new_address(await azec(wn, "new_address", ["z"]))
-    except Exception:
-        pass
+        res = await azec(wn, "new_address", ["z"])
+        z = _addr_from_new_address(res)
+        if not z:
+            print(f"[addresses] {wn} new_address z unparsed: {str(res)[:200]}", flush=True)
+    except Exception as e:
+        print(f"[addresses] {wn} new_address z: {e!r}"[:300], flush=True)
     try:
         ua = _addr_from_new_address(await azec(wn, "new_address", ["oz"]))
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[addresses] {wn} new_address oz: {e!r}"[:300], flush=True)
     if z or t:
         try:
             with open(_meta_path(wn), "w") as f:
@@ -771,9 +938,18 @@ async def create_wallet(request: Request):
     account: fingerprint names the wallet dir, seed derives the sealing key."""
     throttle_signin(request)   # unauthenticated and it writes a wallet dir per call
     tmp_wn = "new_" + secrets.token_hex(8)
-    await azec(tmp_wn, "sync", ["run"])
-    await asyncio.sleep(3)
-    seed_result = await azec(tmp_wn, "recovery_info")
+    if ZINGO_SESSIONS:
+        # Created offline in about a second. The birthday is the chain tip we
+        # last saw, so the first sync scans from now, not from the library's floor.
+        loop = asyncio.get_event_loop()
+        extra = ["--birthday", str(chain_tip["height"])] if chain_tip.get("height") else []
+        async with _wlock(tmp_wn):
+            seed_result = await loop.run_in_executor(
+                CLI_EXECUTOR, _zec_offline, tmp_wn, "recovery_info", None, extra)
+    else:
+        await azec(tmp_wn, "sync", ["run"])
+        await asyncio.sleep(3)
+        seed_result = await azec(tmp_wn, "recovery_info")
     seed_text, birthday = _parse_recovery(seed_result)
     if not seed_text:
         shutil.rmtree(os.path.join(WDIR, tmp_wn), ignore_errors=True)
@@ -790,6 +966,9 @@ async def create_wallet(request: Request):
     os.rename(os.path.join(WDIR, tmp_wn), wdir)
     wallet_keys[wn] = seed_key(norm, fp)
     token = _new_session(wn, z_addr, t_addr, ua_addr)
+    await prime_offline(wn)
+    if ZINGO_SESSIONS:
+        asyncio.create_task(sync_and_cache(wn))   # bring the session up now
     return {
         "token": token,
         "address": z_addr,
@@ -798,15 +977,54 @@ async def create_wallet(request: Request):
         "message": "Wallet created. Save the seed, it is the only way in.",
     }
 
+async def _restore_session(wn, extra_env, extra_args, fail_detail):
+    """Create a wallet by starting its session with the secret, and wait for
+    the first reply: that is when zingo has built the wallet file and the
+    mixnet is up. The sync itself carries on in the background.
+
+    A seed goes in the environment (ZINGO_SEED), never argv: /proc/<pid>/cmdline
+    is world readable, /proc/<pid>/environ is not."""
+    wdir, _ = _wallet_paths(wn)
+    loop = asyncio.get_event_loop()
+    async with restore_sem():
+        async with _wlock(wn):
+            s = await loop.run_in_executor(CLI_EXECUTOR, _start_session, wn, extra_args, extra_env)
+        try:
+            await loop.run_in_executor(CLI_EXECUTOR, lambda: s.run("height", [], 900))
+        except zs.SessionDead:
+            POOL.close(wn, 5)
+            shutil.rmtree(wdir, ignore_errors=True)
+            # Never echo zingo's output here: with a seed restore it is the one
+            # place key material could surface.
+            # Anything seed shaped is stripped before it is logged.
+            tail = " | ".join(list(s.stderr_tail)[-6:])
+            print(f"[restore] session died during restore of {wn}: "
+                  f"{_SEED_SHAPE.sub('[redacted]', tail)[-600:]}", flush=True)
+            raise HTTPException(500, detail=fail_detail)
+        except zs.CommandTimeout:
+            pass  # still bootstrapping; the session stays and finishes on its own
+        except zs.CommandFailed:
+            pass  # e.g. no height before the first sync block; the wallet exists
+        wallet_activity[wn] = time.time()
+
 async def _ensure_wallet_open(norm, wn, key, birthday=0):
     """Unseal a cached wallet or restore it from the chain. Shared by the main
     sign-in and the AI account, which is just a second sealed wallet."""
+    # Opening counts as activity. Without this a restore, which can run for
+    # minutes before any session exists, looks idle to periodic_seal and gets
+    # sealed out from under itself.
+    wallet_activity[wn] = time.time()
     wdir, sealed = _wallet_paths(wn)
     loop = asyncio.get_event_loop()
     restored = False
     if not os.path.isdir(wdir):
         if os.path.exists(sealed):
             await loop.run_in_executor(None, unseal_wallet, wn, key)
+        elif ZINGO_SESSIONS:
+            await _restore_session(wn, {"ZINGO_SEED": norm},
+                                   ["--birthday", str(birthday)] if birthday > 0 else [],
+                                   "Restore failed. Check the seed phrase and birthday, then try again")
+            restored = True
         else:
             # Fresh restore from seed. The seed goes to the CLI process only.
             _, env = wallet_env(wn)
@@ -955,6 +1173,7 @@ async def _ensure_view_wallet_open(ufvk, wn, key, birthday):
     Same sealing machinery as a seed wallet; the only differences are the
     namespace and that zingo is handed --viewkey instead of --seed. What comes
     out cannot spend, by construction, not by policy."""
+    wallet_activity[wn] = time.time()   # see _ensure_wallet_open
     wdir, sealed = _wallet_paths(wn)
     loop = asyncio.get_event_loop()
     restored = False
@@ -970,6 +1189,14 @@ async def _ensure_view_wallet_open(ufvk, wn, key, birthday):
             # expected to supply it, and to remember it afterwards.
             if birthday <= 0:
                 birthday = SAPLING_ACTIVATION.get(CHAIN_NAME, 419200)
+            if ZINGO_SESSIONS:
+                # A viewing key is not a spending secret, but keep it out of
+                # argv all the same where the CLI allows; it does not, yet.
+                await _restore_session(wn, None, ["--viewkey", ufvk, "--birthday", str(birthday)],
+                                       "Could not open that viewing key. Check the birthday height and try again")
+                restored = True
+                wallet_keys[wn] = key
+                return restored
             restore_cmd = cli_prefix() + [CLI, "--chain", CHAIN_NAME, "--server", wallet_server(wn),
                                           "--data-dir", wdir, "--viewkey", ufvk,
                                           "--birthday", str(birthday), "sync", "run"]
@@ -1012,6 +1239,7 @@ async def open_view_wallet(req: OpenViewReq, request: Request):
     token = _new_session(wn, z_addr, t_addr, ua_addr)
     sessions[token]["view_only"] = True
     save_sessions()
+    await prime_offline(wn)
     asyncio.create_task(sync_and_cache(wn))
     return {"token": token, "address": z_addr, "t_address": t_addr,
             "restored": restored, "view_only": True,
@@ -1036,6 +1264,7 @@ async def open_wallet(req: OpenReq, request: Request):
     restored = await _ensure_wallet_open(norm, wn, key, req.birthday)
     z_addr, t_addr, ua_addr = await _read_addresses(wn)
     token = _new_session(wn, z_addr, t_addr, ua_addr)
+    await prime_offline(wn)
     asyncio.create_task(sync_and_cache(wn))
     return {"token": token, "address": z_addr, "t_address": t_addr,
             "restored": restored,
@@ -1063,10 +1292,13 @@ async def get_balance(session=Depends(get_session)):
     if cached_bal:
         asyncio.create_task(sync_and_cache(wn))
         return {"balance": cached_bal}
-    try:
-        await azec(wn, "sync", ["run"])
-    except Exception:
-        pass
+    if not ZINGO_SESSIONS:
+        # A live session syncs on its own; waiting on `sync run` here would
+        # hold the first balance behind the mixnet bootstrap.
+        try:
+            await azec(wn, "sync", ["run"])
+        except Exception:
+            pass
     bal = await azec(wn, "balance")
     parsed = parse_balance(bal)
     wallet_cache.setdefault(wn, {})["balance"] = parsed
@@ -2459,7 +2691,7 @@ async def geovault_create(req: VaultCreateReq, session=Depends(get_session)):
     try:
         result = await azec(wn, "quicksend", [json.dumps(outputs)])
     except HTTPException as e:
-        if e.status_code == 504:
+        if e.status_code in (502, 504):
             # Timeout: the send may still have gone out. Keep the row; the
             # sweeper arms it if the transfer lands, or retires it unfunded.
             return {"vault": _vault_public(vaults[vid], wn), "funding_zec": total / 1e8,
@@ -2607,7 +2839,7 @@ async def geovault_claim(vault_id: str, req: VaultClaimReq, session=Depends(get_
         # A timeout is the one failure where the payment may still have gone out.
         # Retrying that would pay twice, so it parks in "review" for a human
         # instead of going back on the shelf.
-        ambiguous = isinstance(e, HTTPException) and e.status_code == 504
+        ambiguous = isinstance(e, HTTPException) and e.status_code in (502, 504)
         async with geo_lock:
             v["status"] = "review" if ambiguous else "armed"
             if not ambiguous:
@@ -2683,7 +2915,7 @@ async def _refund_vault(v, final_status):
         wallet_cache.pop(v.get("creator_wn", ""), None)
         return True
     except Exception as e:
-        ambiguous = isinstance(e, HTTPException) and e.status_code == 504
+        ambiguous = isinstance(e, HTTPException) and e.status_code in (502, 504)
         async with geo_lock:
             v["status"] = "review" if ambiguous else "armed"
             save_vaults()

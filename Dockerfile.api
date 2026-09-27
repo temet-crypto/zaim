@@ -1,9 +1,12 @@
 FROM python:3.12-slim
 WORKDIR /app
-# zingo-cli is built once at a pinned zingolib commit (see docs in repo) and
-# placed in the build context as ./zingo-cli. No network fetch at image build.
+# zingo-cli and nym-proxy are built once from zingolib_v6.0.0 plus the patches
+# in zingo-patches/ (build steps in its README) and placed in the build context.
+# No network fetch at image build. They ship together: v6 transmits only over
+# the Nym mixnet, and nym-proxy is what it spawns to reach it.
 COPY zingo-cli /app/zingo-cli
-RUN chmod +x /app/zingo-cli
+COPY nym-proxy /app/nym-proxy
+RUN chmod +x /app/zingo-cli /app/nym-proxy
 # torsocks is here so ZAIM_TOR_SOCKS can be switched on without rebuilding.
 # It does nothing unless that variable is set.
 RUN apt-get update && apt-get install -y --no-install-recommends torsocks \
@@ -13,6 +16,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY api/ ./api/
 RUN mkdir -p /app/wallets
 ENV ZAIM_CLI=/app/zingo-cli
+ENV ZAIM_NYM_PROXY=/app/nym-proxy
+# One long-lived zingo process per open wallet (api/zingo_session.py). v6 with
+# this off would pay the ~2 minute mixnet bootstrap on every single command.
+ENV ZAIM_ZINGO_SESSIONS=1
 ENV WALLET_DIR=/app/wallets
 ENV LIGHTWALLETD_SERVER=https://zec.rocks:443
 EXPOSE 8000

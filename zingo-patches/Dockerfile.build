@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1
+# Builds a patched zingo-cli for linux/amd64 (production's architecture).
+FROM rust:1.97.1-slim-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev protobuf-compiler git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --bin zingo-cli && mkdir -p /out && cp target/release/zingo-cli /out/

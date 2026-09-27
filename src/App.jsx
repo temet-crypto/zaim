@@ -387,8 +387,12 @@ function HomeScreen({ onNav }) {
     const z = b.sapling_balance || b.spendable_sapling_balance || b.zbalance || b.verified_zbalance || 0;
     const t = b.transparent_balance || b.tbalance || b.t_balance || 0;
     const o = b.orchard_balance || b.spendable_orchard_balance || b.uabalance || 0;
-    const total = ((typeof z === "number" ? z : parseInt(z) || 0) + (typeof t === "number" ? t : parseInt(t) || 0) + (typeof o === "number" ? o : parseInt(o) || 0)) / 1e8;
-    return { z: toZec(z), t: toZec(t), o: toZec(o), total: total.toFixed(4) };
+    const n = v => (typeof v === "number" ? v : parseInt(v) || 0);
+    // Ironwood succeeds Orchard (NU6.3), and new shielded funds land there.
+    // The server sums every shielded pool; older servers only knew these two.
+    const shielded = b.shielded_balance != null ? n(b.shielded_balance) : n(z) + n(o);
+    const total = (shielded + n(t)) / 1e8;
+    return { z: toZec(shielded), t: toZec(t), o: toZec(o), total: total.toFixed(4) };
   };
   const bal = getBal();
   const usd = price?.usd;
@@ -827,7 +831,7 @@ function SettingsScreen({ onLogout, onAdmin }) {
       <ScreenHead title="Settings" meta="ZAIM" />
       <div className="mp-section">NETWORK</div>
       <KV k="Status" v={conn ? "ONLINE" : "OFFLINE"} color={conn ? T.teal : T.red} />
-      <KVm k="Protocol" v="Shielded · Sapling + Orchard" color={T.blue} />
+      <KVm k="Protocol" v="Shielded, Sapling and Ironwood" color={T.blue} />
       <KVm k="Network" v="Zcash Mainnet" />
 
       <div className="mp-section">INDEXER</div>
