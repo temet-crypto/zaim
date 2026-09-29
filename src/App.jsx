@@ -488,19 +488,23 @@ function HomeScreen({ onNav }) {
         const rawVal = tx.value || tx.amount || 0;
         const zec = Math.abs(typeof rawVal === "number" ? rawVal / 1e8 : parseFloat(rawVal || 0) / 1e8);
         const kind = String(tx.kind || "").toLowerCase().replace(/[-_ ]/g, "");
-        const self = kind.includes("self");
+        // A shield moves your own transparent funds into the shielded pool:
+        // not money in, not money out, so it gets its own neutral row.
+        const shield = kind === "shield";
+        const self = kind.includes("self") || shield;
         const isIn = !self && !kind.startsWith("sen");
+        const pending = tx.status === "mempool" || tx.status === "pending";
         tx.memo = (tx.memo || (Array.isArray(tx.memos) && tx.memos.length ? tx.memos[0] : "") || "").split("\nReply-to:")[0];
         if (tx.memo.startsWith("zaim-sync:")) tx.memo = "contact sync";
         if (tx.memo.startsWith("zaim-vault:")) tx.memo = "vault funding";
         return (
           <div key={i} className="mp-row">
-            <div style={{ width: 64, height: 40, display: "flex", alignItems: "center", justifyContent: "center", background: self ? T.black : isIn ? T.teal : T.red, color: self ? T.white : isIn ? T.black : T.white, fontFamily: F.display, fontWeight: 800, fontSize: 12, letterSpacing: .5, flexShrink: 0 }} aria-label={self ? "Self" : isIn ? "In" : "Out"}>{self ? "SELF" : <TxArrow dir={isIn ? "in" : "out"} />}</div>
+            <div style={{ width: 64, height: 40, display: "flex", alignItems: "center", justifyContent: "center", background: self ? T.black : isIn ? T.teal : T.red, color: self ? T.white : isIn ? T.black : T.white, fontFamily: F.display, fontWeight: 800, fontSize: 12, letterSpacing: .5, flexShrink: 0 }} aria-label={shield ? "Shield" : self ? "Self" : isIn ? "In" : "Out"}>{shield ? "SHIELD" : self ? "SELF" : <TxArrow dir={isIn ? "in" : "out"} />}</div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontFamily: F.body, fontWeight: 600, fontSize: 14 }}>{isIn ? "Received" : self ? "Self" : "Sent"}</div>
+              <div style={{ fontFamily: F.body, fontWeight: 600, fontSize: 14 }}>{shield ? "Shielded" : isIn ? "Received" : self ? "Self" : "Sent"}{pending && <span className="mp-lbl-sm" style={{ marginLeft: 8, color: T.blue }}>PENDING</span>}</div>
               {(tx.memo || tx.address || tx.toaddress) && <div style={{ fontFamily: F.mono, fontSize: 11, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(tx.memo || tx.address || tx.toaddress || "").substring(0, 34)}</div>}
             </div>
-            <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 19, color: isIn ? T.teal : T.red, whiteSpace: "nowrap" }}>{isIn ? "+" : "−"}{zec.toFixed(4)}</div>
+            <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 19, color: shield ? T.black : isIn ? T.teal : T.red, whiteSpace: "nowrap" }}>{shield ? "" : isIn ? "+" : "−"}{zec.toFixed(4)}</div>
           </div>
         );
       })}
