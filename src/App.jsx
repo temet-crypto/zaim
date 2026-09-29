@@ -128,6 +128,15 @@ const BackArrow = ({ onClick }) => (
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l7-7M5 12l7 7" stroke={T.black} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
   </button>
 );
+// Transaction direction: a diagonal arrow, square ends, no rounding.
+// In points down and left (into the wallet), out points up and right.
+const TxArrow = ({ dir }) => (
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+    {dir === "in"
+      ? <path d="M16 4L4 16M4 7v9h9" stroke="currentColor" strokeWidth="3" strokeLinecap="square" strokeLinejoin="miter" />
+      : <path d="M4 16L16 4M7 4h9v9" stroke="currentColor" strokeWidth="3" strokeLinecap="square" strokeLinejoin="miter" />}
+  </svg>
+);
 const Toast = ({ msg, type = "info" }) => msg ? (
   <div style={{ position: "fixed", top: 0, left: "50%", transform: "translateX(-50%)", zIndex: 999, padding: "10px 18px", fontFamily: F.mono, fontSize: 12, letterSpacing: 1, textTransform: "uppercase", maxWidth: 380, textAlign: "center", border: `2px solid ${T.black}`, borderTop: "none", background: type === "error" ? T.red : type === "success" ? T.teal : T.blue, color: type === "success" ? T.black : T.white }}>{msg}</div>
 ) : null;
@@ -416,7 +425,6 @@ function HomeScreen({ onNav }) {
         </button>
       } />
       <div className="mp-band" style={{ paddingTop: 20, paddingBottom: 18 }}>
-        <div className="mp-lbl" style={{ marginBottom: 10 }}>BALANCE · ALL POOLS</div>
         <div className="mp-big">{loading ? "···" : bal.total}</div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
           <span className="mp-lbl">ZEC TOTAL</span>
@@ -433,8 +441,8 @@ function HomeScreen({ onNav }) {
         <div className="mp-cell"><div className="mp-cell-key">TRANSPARENT</div><div className="mp-cell-val" style={{ color: T.blue }}>{bal.t}</div></div>
       </div>
       <div className="mp-section" style={{ display: "flex", justifyContent: "space-between" }}>
-        <span>ZEC / USD · MARKET</span>
-        <span style={{ opacity: .8 }}>{price ? `UPD ${fmtAgo(price.updated_at)}` : "…"}</span>
+        <span>ZEC / USD</span>
+        <span style={{ opacity: .8 }}>{price ? `${fmtAgo(price.updated_at)}` : "…"}</span>
       </div>
       <div className="mp-band mp-band-w" style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between" }}>
         <div>
@@ -487,7 +495,7 @@ function HomeScreen({ onNav }) {
         if (tx.memo.startsWith("zaim-vault:")) tx.memo = "vault funding";
         return (
           <div key={i} className="mp-row">
-            <div style={{ width: 64, height: 40, display: "flex", alignItems: "center", justifyContent: "center", background: self ? T.black : isIn ? T.teal : T.red, color: self ? T.white : isIn ? T.black : T.white, fontFamily: F.display, fontWeight: 800, fontSize: 12, letterSpacing: .5, flexShrink: 0 }}>{self ? "SELF" : isIn ? "IN" : "OUT"}</div>
+            <div style={{ width: 64, height: 40, display: "flex", alignItems: "center", justifyContent: "center", background: self ? T.black : isIn ? T.teal : T.red, color: self ? T.white : isIn ? T.black : T.white, fontFamily: F.display, fontWeight: 800, fontSize: 12, letterSpacing: .5, flexShrink: 0 }} aria-label={self ? "Self" : isIn ? "In" : "Out"}>{self ? "SELF" : <TxArrow dir={isIn ? "in" : "out"} />}</div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontFamily: F.body, fontWeight: 600, fontSize: 14 }}>{isIn ? "Received" : self ? "Self" : "Sent"}</div>
               {(tx.memo || tx.address || tx.toaddress) && <div style={{ fontFamily: F.mono, fontSize: 11, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(tx.memo || tx.address || tx.toaddress || "").substring(0, 34)}</div>}
@@ -855,9 +863,9 @@ function SettingsScreen({ onLogout, onAdmin }) {
 
       <div className="mp-section">INDEXER</div>
       <div style={{ padding: "10px 16px 4px", fontFamily: F.body, fontSize: 12, lineHeight: 1.5 }}>
-        This is the server ZAIM asks for chain data on your behalf. Your browser never
-        contacts it, so it learns this server's address and not yours. What it does see
-        is every lookup and every broadcast ZAIM makes, so it is worth choosing.
+        ZAIM uses this server to read the Zcash chain for you. It never talks to your
+        phone or computer, so it does not know who you are. It can see what ZAIM looks
+        up, so pick one you trust. Your payments go out through a different server.
       </div>
       {(servers?.servers || []).map(s => {
         const on = s.url === mine;

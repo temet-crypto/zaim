@@ -203,3 +203,13 @@ class TestReaper:
         assert m._recently_used("zw_9999999999999999", 600)
         m.wallet_activity["zw_9999999999999999"] = m.time.time() - 3600
         assert not m._recently_used("zw_9999999999999999", 600)
+
+
+class TestNewWalletBirthday:
+    def test_estimate_is_below_the_real_tip(self, monkeypatch):
+        monkeypatch.setattr(m, "CHAIN_NAME", "mainnet")
+        # 2026-09-29 16:55 UTC the explorer tip was 3,500,511.
+        monkeypatch.setattr(m.time, "time", lambda: 1790699875 + 17 * 60)
+        m.chain_tip["height"] = 0
+        bd = m.new_wallet_birthday()
+        assert 3_500_511 - 2_400 < bd < 3_500_511

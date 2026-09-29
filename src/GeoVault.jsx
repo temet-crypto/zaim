@@ -289,7 +289,7 @@ function CreateVault({ onBack, onCreate }) {
           <div style={{ border: `2px solid ${T.black}`, background: T.blueTint, padding: 12 }}>
             <div style={{ fontFamily: F.mono, fontSize: 9, letterSpacing: 1, textTransform: "uppercase", color: T.blue, marginBottom: 4 }}>WHAT THIS COSTS</div>
             <div style={{ fontFamily: F.body, fontSize: 12, lineHeight: 1.5 }}>
-              Your wallet pays {form.zec ? (parseFloat(form.zec) + RESERVE_ZEC).toFixed(4) : "the amount plus " + RESERVE_ZEC.toFixed(4)} ZEC now: the vault amount plus {RESERVE_ZEC.toFixed(4)} to cover the network fee on the payout. It sits in ZAIM escrow until someone opens it, and comes back to you automatically if nobody does by {fmtDate(form.timeEnd) || "the closing time"}.
+              You pay {form.zec ? (parseFloat(form.zec) + RESERVE_ZEC).toFixed(4) : "your amount plus " + RESERVE_ZEC.toFixed(4)} ZEC now. That is {form.zec ? parseFloat(form.zec).toFixed(4) + " ZEC" : "the amount"} for the drop, plus {RESERVE_ZEC.toFixed(4)} ZEC to pay the fee when it gets sent out. ZAIM holds it until someone finds the drop. If nobody finds it by {fmtDate(form.timeEnd) || "the end time"}, you get it all back.
             </div>
           </div>
         </>}

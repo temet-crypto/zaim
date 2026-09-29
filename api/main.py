@@ -139,6 +139,27 @@ SAPLING_ACTIVATION = {"mainnet": 419_200, "testnet": 280_000}
 # saves years of blocks on a restore that has no birthday.
 IRONWOOD_ACTIVATION = {"mainnet": 3_428_143}
 
+# A mainnet height and when it was mined (explorer, 2026-09-29), for estimating
+# today's height from the clock when no engine has reported one. Blocks come
+# every 75 seconds since Blossom.
+HEIGHT_REF = {"mainnet": (3_500_506, 1790699875)}   # 2026-09-29 16:37:55 UTC
+BLOCK_SEC = 75
+NEW_WALLET_MARGIN = 2_300    # ~2 days of blocks: an estimate that runs fast must never skip a deposit
+
+def estimated_tip():
+    ref = HEIGHT_REF.get(CHAIN_NAME)
+    if not ref:
+        return 0
+    return ref[0] + int((time.time() - ref[1]) // BLOCK_SEC)
+
+def new_wallet_birthday():
+    """Where a brand new seed's first sync starts. A new seed cannot have been
+    paid before it existed, so anywhere safely below today is correct; the
+    library's release-stamped floor is correct too, but weeks old, and on this
+    box a first sync from it took over an hour."""
+    tip = max(chain_tip.get("height", 0), estimated_tip())
+    return max(tip - NEW_WALLET_MARGIN, 0)
+
 def default_birthday(wn):
     """zingo v6 refuses a seed restore without --birthday (the old engine
     silently scanned from Sapling). Pick the earliest height the wallet could
@@ -665,6 +686,7 @@ def extract_t_addr(t_result):
 
 chain_tip = {"height": 0}   # highest height any session has reported
 sync_notes = {}             # wn -> last logged poll/run reply, to log changes only
+sync_progress = {}          # wn -> percent scanned while a sync is running
 
 async def sync_and_cache(wallet_name):
     # Never operate on a wallet that is sealed or gone: the CLI would
@@ -685,6 +707,19 @@ async def sync_and_cache(wallet_name):
             if note and sync_notes.get(wallet_name) != note:
                 sync_notes[wallet_name] = note
                 print(f"[sync] {wallet_name}: {note}", flush=True)
+            if "not complete" in note:
+                try:
+                    st = await azec(wallet_name, "sync", ["status"])
+                    pct = st.get("percentage_total_outputs_scanned") if isinstance(st, dict) else None
+                    if pct is None and isinstance(st, dict):
+                        pct = next((v for k, v in st.items() if "percent" in k), None)
+                    if pct is not None:
+                        sync_progress[wallet_name] = float(pct)
+                        print(f"[sync] {wallet_name}: {float(pct):.1f}% scanned", flush=True)
+                except Exception:
+                    pass
+            else:
+                sync_progress.pop(wallet_name, None)
         else:
             await azec(wallet_name, "sync", ["run"])
         bal = await azec(wallet_name, "balance")
@@ -1049,7 +1084,8 @@ async def create_wallet(request: Request):
         # Created offline in about a second. The birthday is the chain tip we
         # last saw, so the first sync scans from now, not from the library's floor.
         loop = asyncio.get_event_loop()
-        extra = ["--birthday", str(chain_tip["height"])] if chain_tip.get("height") else []
+        bd = new_wallet_birthday()
+        extra = ["--birthday", str(bd)] if bd else []
         async with _wlock(tmp_wn):
             seed_result = await loop.run_in_executor(
                 CLI_EXECUTOR, _zec_offline, tmp_wn, "recovery_info", None, extra)

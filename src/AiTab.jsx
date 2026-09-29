@@ -191,9 +191,7 @@ export default function AiTab({ aiReady, storeKey }) {
       <div ref={scroller} style={{ flex: 1, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
         {msgs.length === 0 && (
           <div style={{ fontFamily: F.body, fontSize: 13, lineHeight: 1.55, opacity: 0.75 }}>
-            Ask anything. The question is encrypted on this device, sent as a shielded
-            transaction from a separate AI account, and the answer returns encrypted to a
-            key that never leaves this browser.
+            Ask anything. Your question is locked on this device before it leaves. It goes out from your AI account, not your main wallet. The answer comes back locked too, and only this browser can open it.
           </div>
         )}
         {msgs.map((m, i) => (
