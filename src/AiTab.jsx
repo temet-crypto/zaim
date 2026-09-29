@@ -13,6 +13,7 @@ import { apiGet, apiPost } from "./api.js";
 import { assembleReply, buildRequest, hex, parseReplyMemo, TYPE, MEMO_MAX } from "./ai/protocol.js";
 import { clearPending, listPending, savePending } from "./ai/store.js";
 import { convHash, newConvSecret, ZERO_CONV } from "./ai/derive.js";
+import { takeSeed } from "./ai/spendkey.js";
 
 const b64 = (u8) => btoa(String.fromCharCode(...u8));
 
@@ -154,7 +155,8 @@ export default function AiTab({ aiReady, storeKey }) {
     if (!zats || zats <= 0) return say("Enter an amount");
     setBusy(true);
     try {
-      await apiPost("/ai/topup", { amount_zats: zats });
+      // A view-key session signs with the seed held in this tab (never stored).
+      await apiPost("/ai/topup", { amount_zats: zats, seed_phrase: localStorage.getItem("zaim_view_only") === "1" ? (takeSeed() || "") : "" });
       say("Top-up sent. It spends after confirmation");
       setTopup(false);
       setTimeout(refresh, 4000);

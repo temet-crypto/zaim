@@ -207,6 +207,9 @@ function AuthScreen({ onAuth }) {
           .then((r) => { if (r.height) localStorage.setItem("zaim_ai_birthday", String(r.height)); })
           .catch(() => {});
       } catch (e) { /* non-fatal */ }
+      // Keep the new wallet's birthday: a later sign in sends it, so the server
+      // scans from here instead of from 2018.
+      if (res.seed && res.seed.birthday) localStorage.setItem("zaim_birthday", String(res.seed.birthday));
       if (res.seed) setSeed(typeof res.seed === "string" ? res.seed : (res.seed.seed || JSON.stringify(res.seed)));
       else onAuth();
     } catch (e) { setError(e.message); }

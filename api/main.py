@@ -2317,6 +2317,7 @@ class AiOpenReq(BaseModel):
 
 class AiTopupReq(BaseModel):
     amount_zats: int
+    seed_phrase: str = ""   # view-key sessions only: the main wallet signs this one send
 
 class AiSendReq(BaseModel):
     amount_zats: int
@@ -2390,6 +2391,12 @@ async def ai_topup(req: AiTopupReq, session=Depends(get_session)):
     if not dest:
         raise HTTPException(500, detail="Could not derive a top-up address")
     outputs = [{"address": dest, "amount": req.amount_zats}]
+    if session.get("view_only") or session["wallet_name"].startswith("zv_"):
+        # A viewing key cannot spend; the seed signs this send, as at Send.
+        if not req.seed_phrase:
+            raise HTTPException(400, detail="Topping up needs your seed. Enter it once and it is kept in this tab only")
+        txid = await _spend_once(session, SpendReq(seed_phrase=req.seed_phrase, outputs=outputs))
+        return {"txid": txid, "amount_zats": req.amount_zats}
     result = await azec(session["wallet_name"], "quicksend", [json.dumps(outputs)])
     txid = _extract_txid(result)
     if not txid:
