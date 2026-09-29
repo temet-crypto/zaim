@@ -389,7 +389,7 @@ function HomeScreen({ onNav }) {
     return `${Math.floor(s / 3600)}h ago`;
   };
   const getBal = () => {
-    if (!balance) return { z: "0.0000", t: "0.0000", o: "0.0000", total: "0.0000" };
+    if (!balance) return { z: "0.0000", t: "0.0000", o: "0.0000", total: "0.0000", pending: 0 };
     const b = balance.balance || balance;
     const toZec = v => ((typeof v === "number" ? v : parseInt(v) || 0) / 1e8).toFixed(4);
     const z = b.sapling_balance || b.spendable_sapling_balance || b.zbalance || b.verified_zbalance || 0;
@@ -400,7 +400,7 @@ function HomeScreen({ onNav }) {
     // The server sums every shielded pool; older servers only knew these two.
     const shielded = b.shielded_balance != null ? n(b.shielded_balance) : n(z) + n(o);
     const total = (shielded + n(t)) / 1e8;
-    return { z: toZec(shielded), t: toZec(t), o: toZec(o), total: total.toFixed(4) };
+    return { z: toZec(shielded), t: toZec(t), o: toZec(o), total: total.toFixed(4), pending: n(b.pending_balance) };
   };
   const bal = getBal();
   const usd = price?.usd;
@@ -422,6 +422,11 @@ function HomeScreen({ onNav }) {
           <span className="mp-lbl">ZEC TOTAL</span>
           {usdVal != null && <span style={{ fontFamily: F.mono, fontSize: 12, color: T.black }}>≈ {fmtUsd(usdVal)} USD</span>}
         </div>
+        {bal.pending > 0 && (
+          <div className="mp-lbl-sm" style={{ marginTop: 10, color: T.blue }}>
+            +{(bal.pending / 1e8).toFixed(4)} ZEC ARRIVING, WAITING FOR CONFIRMATION
+          </div>
+        )}
       </div>
       <div className="mp-grid">
         <div className="mp-cell"><div className="mp-cell-key">SHIELDED</div><div className="mp-cell-val" style={{ color: T.teal }}>{bal.z}</div></div>
@@ -663,7 +668,7 @@ function MessengerScreen({ onNav }) {
         const merged = [...local, ...incoming];
         localStorage.setItem("zaim_contacts", JSON.stringify(merged));
         setContacts(merged);
-        setSyncMsg(`${incoming.length} contact${incoming.length > 1 ? "s" : ""} pulled from the chain`);
+        setSyncMsg(`${incoming.length} contact${incoming.length > 1 ? "s" : ""} restored from your backup`);
         setTimeout(() => setSyncMsg(""), 4000);
       }
     }).catch(() => { });
@@ -672,10 +677,10 @@ function MessengerScreen({ onNav }) {
   // It spends dust, so it only ever happens on an explicit, confirmed tap.
   const push = async () => {
     const book = Contacts.list();
-    if (!book.length) { setSyncMsg("Nothing to sync yet"); setTimeout(() => setSyncMsg(""), 2500); return; }
+    if (!book.length) { setSyncMsg("No contacts to back up yet"); setTimeout(() => setSyncMsg(""), 2500); return; }
     if (!window.confirm(`Write ${book.length} contact${book.length > 1 ? "s" : ""} to the chain as encrypted memos? Costs about 0.001 ZEC. Only your seed can read them.`)) return;
     setSyncing(true);
-    try { const r = await API.syncPush(book); setChainTs(r.ts); setSyncMsg(`Synced · ${r.chunks} memo${r.chunks > 1 ? "s" : ""} · ${r.cost_zec} ZEC`); }
+    try { const r = await API.syncPush(book); setChainTs(r.ts); setSyncMsg(`Backed up, fee ${r.cost_zec} ZEC`); }
     catch (e) { setSyncMsg(e.message); }
     setSyncing(false); setTimeout(() => setSyncMsg(""), 5000);
   };
@@ -697,8 +702,8 @@ function MessengerScreen({ onNav }) {
         </div>
       )}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "9px 16px", borderBottom: `2px solid ${T.black}`, background: T.white }}>
-        <span className="mp-lbl-sm">{syncMsg || (chainTs ? `CHAIN SYNC · ${new Date(chainTs * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : "CHAIN SYNC · NOTHING ON CHAIN YET")}</span>
-        <button className="mp-link" onClick={push} disabled={syncing}>{syncing ? "WRITING…" : "PUSH TO CHAIN"}</button>
+        <span className="mp-lbl-sm">{syncMsg || (chainTs ? `CONTACTS BACKED UP ${new Date(chainTs * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" }).toUpperCase()}` : "CONTACTS NOT BACKED UP")}</span>
+        <button className="mp-link" onClick={push} disabled={syncing}>{syncing ? "BACKING UP…" : "BACK UP CONTACTS"}</button>
       </div>
       {contacts.map((c, i) => (
         <div key={i} onClick={() => onNav("chat", c)} className="mp-row" style={{ cursor: "pointer" }}>

@@ -171,7 +171,7 @@ export default function AiTab({ aiReady, storeKey }) {
     <div className="mp-scroll" style={{ display: "flex", flexDirection: "column" }}>
       <div className="mp-head">
         <div className="mp-title">AI</div>
-        <div className="mp-meta" style={{ color: T.blue }}>{mock ? "PREVIEW · NO RELAY" : "ON-CHAIN"}</div>
+        <button className="mp-link" onClick={newIdentity}>CLEAR</button>
       </div>
 
       {/* balance strip */}
@@ -208,26 +208,18 @@ export default function AiTab({ aiReady, storeKey }) {
 
       {/* honest label + input */}
       <div style={{ borderTop: `2px solid ${T.black}`, background: T.white, padding: 12 }}>
-        <Lbl style={{ marginBottom: 8 }}>
-          ANONYMOUS TO THE RELAY AND THE AI PROVIDER. THE ZAIM SERVER CAN SEE THAT YOUR
-          ACCOUNT USED AI, NOT WHAT YOU ASKED.
-        </Lbl>
         <div style={{ display: "flex", gap: 8 }}>
           <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (mock ? ask() : setSheet(true))}
             placeholder="Ask anonymously" style={{ flex: 1, border: `2px solid ${T.black}`, padding: "10px 12px", fontFamily: F.body, fontSize: 14, background: T.off }} />
           <button className="mp-btn" style={{ width: "auto", padding: "0 18px" }} disabled={busy || !input.trim()}
             onClick={() => (mock ? ask() : setSheet(true))}>ASK</button>
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8 }}>
-          <button className="mp-link" onClick={newIdentity}>NEW IDENTITY</button>
-          <Lbl>MODE: {mock ? "PREVIEW" : "ON-CHAIN"} · FAST MODE COMES WITH PHASE 7</Lbl>
-        </div>
       </div>
 
       {/* fee breakdown sheet */}
       {sheet && quote && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", display: "flex", alignItems: "flex-end", zIndex: 40 }} onClick={() => setSheet(false)}>
-          <div style={{ background: T.off, borderTop: `3px solid ${T.black}`, width: "100%", padding: 16 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 40 }} onClick={() => setSheet(false)}>
+          <div style={{ background: T.off, border: `2px solid ${T.black}`, borderTop: `3px solid ${T.black}`, width: "100%", maxWidth: 424, boxSizing: "border-box", padding: 16 }} onClick={(e) => e.stopPropagation()}>
             <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 18, marginBottom: 10 }}>THIS QUESTION COSTS</div>
             {[["Your send fee", quote.send_fee_zats], ["Reply network cost", quote.reply_network_zats], ["Inference", quote.inference_zats], ["ZAIM fee", quote.zaim_fee_zats]].map(([k, v]) => (
               <div key={k} className="mp-kv"><span className="mp-kv-key">{k}</span><span className="mp-kv-val mono">{(v / 1e8).toFixed(6)} ZEC</span></div>
@@ -241,8 +233,8 @@ export default function AiTab({ aiReady, storeKey }) {
 
       {/* top up sheet */}
       {topup && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", display: "flex", alignItems: "flex-end", zIndex: 40 }} onClick={() => setTopup(false)}>
-          <div style={{ background: T.off, borderTop: `3px solid ${T.black}`, width: "100%", padding: 16 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 40 }} onClick={() => setTopup(false)}>
+          <div style={{ background: T.off, border: `2px solid ${T.black}`, borderTop: `3px solid ${T.black}`, width: "100%", maxWidth: 424, boxSizing: "border-box", padding: 16 }} onClick={(e) => e.stopPropagation()}>
             <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 18, marginBottom: 6 }}>TOP UP AI ACCOUNT</div>
             <Lbl style={{ marginBottom: 8 }}>INTERNAL SHIELDED TRANSFER FROM YOUR MAIN WALLET. THE AI ACCOUNT IS A SEPARATE SEED, DERIVED FROM YOURS — RECOVERABLE WITH THE SAME 24 WORDS.</Lbl>
             <input value={topupAmt} onChange={(e) => setTopupAmt(e.target.value)} inputMode="decimal"
@@ -252,7 +244,7 @@ export default function AiTab({ aiReady, storeKey }) {
         </div>
       )}
 
-      {toast && <div style={{ position: "fixed", bottom: 90, left: 16, right: 16, background: T.black, color: T.white, padding: "10px 12px", fontFamily: F.mono, fontSize: 12, zIndex: 50 }}>{toast}</div>}
+      {toast && <div style={{ position: "fixed", bottom: 90, left: "50%", transform: "translateX(-50%)", width: "calc(100% - 32px)", maxWidth: 392, background: T.black, color: T.white, padding: "10px 12px", fontFamily: F.mono, fontSize: 12, zIndex: 50 }}>{toast}</div>}
     </div>
   );
 }

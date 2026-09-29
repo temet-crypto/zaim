@@ -609,6 +609,10 @@ def _alias_balance(result):
     # to Ironwood, so for "how much can I spend privately" they are one number.
     result["shielded_balance"] = sum(int(result.get(f"{p}_balance", 0) or 0)
                                      for p in ("sapling", "orchard", "ironwood"))
+    # Received but not yet confirmed. Without this the card read 0.0000 while
+    # the transaction list showed the deposits, which looks like lost money.
+    result["pending_balance"] = sum(int(result.get(f"unconfirmed_{p}_balance", 0) or 0)
+                                    for p in ("sapling", "orchard", "ironwood", "transparent"))
     return result
 
 def parse_transactions(raw):
@@ -660,6 +664,7 @@ def extract_t_addr(t_result):
     return ""
 
 chain_tip = {"height": 0}   # highest height any session has reported
+sync_notes = {}             # wn -> last logged poll/run reply, to log changes only
 
 async def sync_and_cache(wallet_name):
     # Never operate on a wallet that is sealed or gone: the CLI would
@@ -667,7 +672,21 @@ async def sync_and_cache(wallet_name):
     if not os.path.isdir(os.path.join(WDIR, wallet_name)):
         return None, None
     try:
-        await azec(wallet_name, "sync", ["run"])
+        if ZINGO_SESSIONS:
+            # Collect a finished sync before asking for a new one. A sync that
+            # completed but was never polled can leave the engine treating it as
+            # still running, and every later `sync run` is then a no-op: the
+            # wallet stops following the chain. Seen on mainnet 2026-09-29, two
+            # deposits mined and still shown as mempool 15 minutes later.
+            polled = await azec(wallet_name, "sync", ["poll"])
+            ran = await azec(wallet_name, "sync", ["run"])
+            note = f"{str(polled.get('raw', polled))[:80]} / {str(ran.get('raw', ran))[:40]}" \
+                if isinstance(polled, dict) and isinstance(ran, dict) else ""
+            if note and sync_notes.get(wallet_name) != note:
+                sync_notes[wallet_name] = note
+                print(f"[sync] {wallet_name}: {note}", flush=True)
+        else:
+            await azec(wallet_name, "sync", ["run"])
         bal = await azec(wallet_name, "balance")
         parsed_bal = parse_balance(bal)
         if ZINGO_SESSIONS:
@@ -687,7 +706,7 @@ async def sync_and_cache(wallet_name):
         }
         return parsed_bal, parsed_txs
     except Exception as e:
-        print(f"Sync error for {wallet_name}: {e}")
+        print(f"[sync] error for {wallet_name}: {e!r}"[:300], flush=True)
         return None, None
 
 async def auto_shield(wallet_name):
@@ -769,13 +788,42 @@ async def periodic_price():
         await update_price()
         await asyncio.sleep(60)
 
+# Each running zingo session keeps ~3 Nym proxies busy with cover traffic, about
+# 70% of this box's one CPU, whether or not anyone is looking. So in session
+# mode only wallets someone used recently are kept synced, and engines nobody
+# is using are quit (periodic_reap). A returning user pays one mixnet bootstrap.
+ACTIVE_SYNC_SEC = int(os.getenv("ZAIM_ACTIVE_SYNC_MIN", "15")) * 60
+SESSION_IDLE_SEC = int(os.getenv("ZAIM_SESSION_IDLE_MIN", "10")) * 60
+
+def _recently_used(wn, window):
+    return time.time() - wallet_activity.get(wn, 0) < window
+
+async def periodic_reap():
+    """Quit engines nobody is using. Never kills (see zingo_session.py)."""
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(60)
+        if not ZINGO_SESSIONS:
+            continue
+        now = time.time()
+        for wn in POOL.names():
+            s = POOL.get(wn)
+            if not s or s.pending:
+                continue
+            if now - s.last_used < SESSION_IDLE_SEC or _recently_used(wn, SESSION_IDLE_SEC):
+                continue
+            if wn in spend_windows or os.path.exists(_migration_marker(wn)):
+                continue
+            ok = await loop.run_in_executor(CLI_EXECUTOR, POOL.close, wn, 120)
+            print(f"[session] {wn} idle, {'quit' if ok else 'did not quit'}", flush=True)
+
 async def periodic_sync():
     while True:
         await asyncio.sleep(120)
         active_wallets = set()
         for sid, sess in list(sessions.items()):
             wn = sess.get("wallet_name", "")
-            if wn:
+            if wn and (not ZINGO_SESSIONS or _recently_used(wn, ACTIVE_SYNC_SEC)):
                 active_wallets.add(wn)
         for wn in active_wallets:
             try:
@@ -786,6 +834,8 @@ async def periodic_sync():
 
 async def startup_sync():
     await asyncio.sleep(3)
+    if ZINGO_SESSIONS:
+        return   # engines start when their owner is active (periodic_sync)
     active_wallets = set()
     for sid, sess in list(sessions.items()):
         wn = sess.get("wallet_name", "")
@@ -812,7 +862,9 @@ async def lifespan(app: FastAPI):
     escrow_task = asyncio.create_task(ensure_escrow())
     migration_task = asyncio.create_task(periodic_migration())
     spend_lock_task = asyncio.create_task(periodic_spend_lock())
+    reap_task = asyncio.create_task(periodic_reap())
     yield
+    reap_task.cancel()
     migration_task.cancel()
     spend_lock_task.cancel()
     sync_task.cancel()
@@ -2870,6 +2922,12 @@ async def ensure_escrow():
     wdir = os.path.join(WDIR, ESCROW_WN)
     fresh = not os.path.isdir(wdir)
     try:
+        if ZINGO_SESSIONS and not fresh:
+            # Addresses come from the wallet file; the engine (and its Nym
+            # proxies) starts only when a vault actually needs escrow.
+            z, t, ua = await _read_addresses(ESCROW_WN)
+            escrow_addr.update({"z": z, "t": t, "ua": ua})
+            return bool(z or ua)
         await azec(ESCROW_WN, "sync", ["run"])
         if fresh:
             await asyncio.sleep(2)

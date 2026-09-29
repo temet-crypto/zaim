@@ -195,3 +195,11 @@ class TestDefaultBirthday:
     def test_main_wallets_scan_from_sapling(self, monkeypatch):
         monkeypatch.setattr(m, "CHAIN_NAME", "mainnet")
         assert m.default_birthday("zw_abc") == 419_200
+
+
+class TestReaper:
+    def test_recently_used_window(self):
+        m.wallet_activity["zw_9999999999999999"] = m.time.time() - 60
+        assert m._recently_used("zw_9999999999999999", 600)
+        m.wallet_activity["zw_9999999999999999"] = m.time.time() - 3600
+        assert not m._recently_used("zw_9999999999999999", 600)
