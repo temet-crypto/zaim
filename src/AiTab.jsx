@@ -30,13 +30,16 @@ export default function AiTab({ aiReady, storeKey }) {
   const [topup, setTopup] = useState(false);
   const [topupAmt, setTopupAmt] = useState("0.005");
   const [toast, setToast] = useState("");
+  const [closed, setClosed] = useState("");   // why the AI account is not usable, if it is not
   const [busy, setBusy] = useState(false);
   const scroller = useRef(null);
 
   const say = (m) => { setToast(m); setTimeout(() => setToast(""), 2600); };
   const refresh = () => {
     apiGet("/ai/quote").then(setQuote).catch(() => {});
-    if (aiReady) apiGet("/ai/balance").then((r) => setBalance(r.balance)).catch(() => {});
+    if (aiReady) apiGet("/ai/balance")
+      .then((r) => { setBalance(r.balance); setClosed(""); })
+      .catch((e) => setClosed(e.message || ""));
   };
   useEffect(refresh, [aiReady]);
 
@@ -173,6 +176,10 @@ export default function AiTab({ aiReady, storeKey }) {
         <div className="mp-title">AI</div>
         <button className="mp-link" onClick={newIdentity}>CLEAR</button>
       </div>
+
+      {closed && (
+        <div className="mp-band" style={{ background: T.red, color: T.white, fontFamily: F.body, fontSize: 14, lineHeight: 1.5 }}>{closed}</div>
+      )}
 
       {/* balance strip */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: `2px solid ${T.black}`, background: T.white }}>

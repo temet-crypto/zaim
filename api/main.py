@@ -2313,6 +2313,7 @@ AI_PRICE_BUFFER = float(os.getenv("AI_PRICE_BUFFER", "1.10"))        # 10% volat
 
 class AiOpenReq(BaseModel):
     seed_phrase: str   # the DERIVED AI seed; the main seed never appears here
+    birthday: int = 0
 
 class AiTopupReq(BaseModel):
     amount_zats: int
@@ -2324,7 +2325,7 @@ class AiSendReq(BaseModel):
 def _ai_wallet(session):
     wn = session.get("ai_wallet")
     if not wn:
-        raise HTTPException(409, detail="Open the AI account first")
+        raise HTTPException(409, detail="Your AI account is not open. Sign out and sign back in to open it")
     return wn
 
 @app.post("/api/ai/open")
@@ -2334,7 +2335,19 @@ async def ai_open(req: AiOpenReq, session=Depends(get_session)):
     norm = normalize_seed(req.seed_phrase)
     fp = seed_fingerprint(norm)
     wn = "zai_" + fp
-    restored = await _ensure_wallet_open(norm, wn, seed_key(norm, fp))
+    bd = req.birthday
+    if bd <= 0 and not os.path.isdir(os.path.join(WDIR, wn)) and not os.path.exists(_wallet_paths(wn)[1]):
+        # First open: the AI account cannot hold anything older than its own
+        # main wallet, nor older than the AI tab. Scanning from the later of the
+        # two keeps a new user's first AI sync to minutes.
+        bd = default_birthday(wn)
+        try:
+            b = await azec(session["wallet_name"], "birthday")
+            main_bd = int(b.get("raw", b) if isinstance(b, dict) else b)
+            bd = max(bd, main_bd)
+        except Exception:
+            pass
+    restored = await _ensure_wallet_open(norm, wn, seed_key(norm, fp), bd)
     session["ai_wallet"] = wn
     save_sessions()
     bal = parse_balance(await azec(wn, "balance"))
