@@ -32,6 +32,12 @@ export default function AiTab({ aiReady, storeKey }) {
   const [topupAmt, setTopupAmt] = useState("0.005");
   const [toast, setToast] = useState("");
   const [closed, setClosed] = useState("");   // why the AI account is not usable, if it is not
+  // A top-up on its way: { zats, base } where base is the balance when it was
+  // sent. Kept in sessionStorage so a reload still says what is happening.
+  const [arriving, setArriving] = useState(() => {
+    try { return JSON.parse(sessionStorage.getItem("zaim_ai_arriving") || "null"); } catch { return null; }
+  });
+  const [topupErr, setTopupErr] = useState("");
   const [busy, setBusy] = useState(false);
   const scroller = useRef(null);
 
@@ -152,17 +158,31 @@ export default function AiTab({ aiReady, storeKey }) {
 
   async function doTopup() {
     const zats = Math.round(parseFloat(topupAmt || "0") * 1e8);
-    if (!zats || zats <= 0) return say("Enter an amount");
-    setBusy(true);
+    if (!zats || zats <= 0) return setTopupErr("Enter an amount");
+    setBusy(true); setTopupErr("");
     try {
       // A view-key session signs with the seed held in this tab (never stored).
       await apiPost("/ai/topup", { amount_zats: zats, seed_phrase: localStorage.getItem("zaim_view_only") === "1" ? (takeSeed() || "") : "" });
-      say("Top-up sent. It spends after confirmation");
+      const a = { zats, base: spendable };
+      setArriving(a);
+      try { sessionStorage.setItem("zaim_ai_arriving", JSON.stringify(a)); } catch { }
       setTopup(false);
       setTimeout(refresh, 4000);
-    } catch (e) { say(e.message); }
+    } catch (e) { setTopupErr(e.message || "The top up did not go through"); }
     setBusy(false);
   }
+
+  // Clear the notice once the money has landed, and check every 30s until then.
+  useEffect(() => {
+    if (!arriving) return;
+    if (spendable > arriving.base) {
+      setArriving(null);
+      try { sessionStorage.removeItem("zaim_ai_arriving"); } catch { }
+      return;
+    }
+    const t = setInterval(refresh, 30_000);
+    return () => clearInterval(t);
+  }, [arriving, spendable]);
 
   const newIdentity = () => {
     setConvSecret(newConvSecret());
@@ -181,6 +201,12 @@ export default function AiTab({ aiReady, storeKey }) {
 
       {closed && (
         <div className="mp-band" style={{ background: T.red, color: T.white, fontFamily: F.body, fontSize: 14, lineHeight: 1.5 }}>{closed}</div>
+      )}
+
+      {arriving && (
+        <div className="mp-band" style={{ background: T.teal, color: T.black, fontFamily: F.body, fontSize: 14, lineHeight: 1.5 }}>
+          Sent {(arriving.zats / 1e8).toFixed(4)} ZEC to your AI account. It shows here in a few minutes.
+        </div>
       )}
 
       {/* balance strip */}
@@ -246,7 +272,8 @@ export default function AiTab({ aiReady, storeKey }) {
             <Lbl style={{ marginBottom: 8 }}>INTERNAL SHIELDED TRANSFER FROM YOUR MAIN WALLET. THE AI ACCOUNT IS A SEPARATE SEED, DERIVED FROM YOURS — RECOVERABLE WITH THE SAME 24 WORDS.</Lbl>
             <input value={topupAmt} onChange={(e) => setTopupAmt(e.target.value)} inputMode="decimal"
               style={{ width: "100%", border: `2px solid ${T.black}`, padding: "10px 12px", fontFamily: F.mono, fontSize: 16, marginBottom: 10 }} />
-            <button className="mp-btn" onClick={doTopup} disabled={busy}>SEND TO AI ACCOUNT</button>
+            {topupErr && <div style={{ background: T.red, color: T.white, fontFamily: F.body, fontSize: 14, padding: "10px 12px", marginBottom: 10 }}>{topupErr}</div>}
+            <button className="mp-btn" onClick={doTopup} disabled={busy}>{busy ? "SENDING, THIS CAN TAKE 2 MINUTES" : "SEND TO AI ACCOUNT"}</button>
           </div>
         </div>
       )}
