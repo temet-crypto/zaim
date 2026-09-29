@@ -995,7 +995,7 @@ def _addr_from_new_address(res):
             if isinstance(v, str) and len(v) > 20:
                 return v
         for v in res.values():
-            if isinstance(v, str) and (v.startswith("u1") or v.startswith("zs1") or v.startswith("t1")):
+            if isinstance(v, str) and v.startswith(("u1", "zs1", "t1", "utest1", "ztestsapling1", "tm")):
                 return v
         raw = res.get("raw", "")
         m = re.search(r"(u1[0-9a-z]{20,}|zs1[0-9a-z]{20,})", str(raw))
@@ -2369,14 +2369,9 @@ async def ai_balance(session=Depends(get_session)):
 async def ai_address(session=Depends(get_session)):
     """Fresh diversified orchard-only address on the AI account (reply addr)."""
     res = await azec(_ai_wallet(session), "new_address", ["o"])
-    addr = res.get("address") if isinstance(res, dict) else None
+    addr = _addr_from_new_address(res)
     if not addr:
-        # zingo prints the address list; last entry is the new one
-        try:
-            addr = res[-1]["encoded_address"] if isinstance(res, list) else str(res.get("raw", ""))[:0]
-        except Exception:
-            addr = ""
-    if not addr:
+        print(f"[ai] new_address unparsed: {str(res)[:200]}", flush=True)
         raise HTTPException(500, detail="Could not derive a reply address")
     return {"address": addr}
 
@@ -2387,8 +2382,9 @@ async def ai_topup(req: AiTopupReq, session=Depends(get_session)):
         raise HTTPException(400, detail="Amount too small")
     ai_wn = _ai_wallet(session)
     res = await azec(ai_wn, "new_address", ["o"])
-    dest = res.get("address") if isinstance(res, dict) else (res[-1].get("encoded_address") if isinstance(res, list) and res else None)
+    dest = _addr_from_new_address(res)
     if not dest:
+        print(f"[ai] new_address unparsed: {str(res)[:200]}", flush=True)
         raise HTTPException(500, detail="Could not derive a top-up address")
     outputs = [{"address": dest, "amount": req.amount_zats}]
     if session.get("view_only") or session["wallet_name"].startswith("zv_"):

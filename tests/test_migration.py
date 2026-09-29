@@ -213,3 +213,11 @@ class TestNewWalletBirthday:
         m.chain_tip["height"] = 0
         bd = m.new_wallet_birthday()
         assert 3_500_511 - 2_400 < bd < 3_500_511
+
+
+class TestNewAddressShapes:
+    def test_v6_object_with_encoded_address(self):
+        assert m._addr_from_new_address({"account": 0, "address_index": 3, "encoded_address": "u1" + "q" * 60}).startswith("u1")
+
+    def test_list_form(self):
+        assert m._addr_from_new_address([{"encoded_address": "u1" + "a" * 60}]).startswith("u1")
