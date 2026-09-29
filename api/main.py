@@ -860,6 +860,11 @@ async def periodic_sync():
             wn = sess.get("wallet_name", "")
             if wn and (not ZINGO_SESSIONS or _recently_used(wn, ACTIVE_SYNC_SEC)):
                 active_wallets.add(wn)
+                # The AI account is a second wallet on the same session. Without
+                # this it never synced, so a top-up never showed up in it.
+                ai_wn = sess.get("ai_wallet")
+                if ai_wn and os.path.isdir(os.path.join(WDIR, ai_wn)):
+                    active_wallets.add(ai_wn)
         for wn in active_wallets:
             try:
                 await sync_and_cache(wn)
