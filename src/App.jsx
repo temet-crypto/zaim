@@ -434,7 +434,7 @@ function HomeScreen({ onNav }) {
       <div className="mp-band mp-band-w" style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between" }}>
         <div>
           <div className="mp-big" style={{ fontSize: 40 }}>{usd != null ? fmtUsd(usd) : "···"}</div>
-          <div className="mp-lbl-sm" style={{ marginTop: 6 }}>ZCASH · COINGECKO</div>
+          <div className="mp-lbl-sm" style={{ marginTop: 6 }}>ZCASH {price?.source ? price.source.toUpperCase() : ""}</div>
         </div>
         {chg != null && (
           <div style={{ textAlign: "right" }}>
@@ -700,9 +700,7 @@ function MessengerScreen({ onNav }) {
         <span className="mp-lbl-sm">{syncMsg || (chainTs ? `CHAIN SYNC · ${new Date(chainTs * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : "CHAIN SYNC · NOTHING ON CHAIN YET")}</span>
         <button className="mp-link" onClick={push} disabled={syncing}>{syncing ? "WRITING…" : "PUSH TO CHAIN"}</button>
       </div>
-      {contacts.length === 0 ? (
-        <div className="mp-band" style={{ textAlign: "center" }}><div className="mp-quip" style={{ marginBottom: 8 }}>No contacts yet.</div><div className="mp-lbl-sm">TAP + TO START A CONVERSATION</div></div>
-      ) : contacts.map((c, i) => (
+      {contacts.map((c, i) => (
         <div key={i} onClick={() => onNav("chat", c)} className="mp-row" style={{ cursor: "pointer" }}>
           <div style={{ width: 44, height: 44, background: T.blue, color: T.white, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: F.display, fontWeight: 800, fontSize: 20, flexShrink: 0 }}>{c.name.charAt(0).toUpperCase()}</div>
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -874,13 +872,6 @@ function SettingsScreen({ onLogout, onAdmin }) {
           </button>
         );
       })}
-      {servers?.same_operator && (
-        <div style={{ padding: "10px 16px", fontFamily: F.body, fontSize: 12, lineHeight: 1.5, background: T.off, borderBottom: `2px solid ${T.black}` }}>
-          Worth saying plainly: every option above is run by the same operator, so
-          switching changes your latency and not who can watch you. Running your own
-          indexer is the only version of this that is real.
-        </div>
-      )}
       <div className="mp-section">SECURITY</div>
       <KV k="Encryption" v="E2E SHIELDED" color={T.teal} />
       <KVm k="Key Storage" v="Server side · custodial" />
@@ -914,10 +905,7 @@ function SettingsScreen({ onLogout, onAdmin }) {
           </div>
         )}
       </div>
-      <div style={{ padding: 16 }}><button className="mp-btn danger" onClick={onLogout}>SIGN OUT AND SEAL</button></div>
-      <div style={{ padding: "0 16px 8px", textAlign: "center" }}>
-        <span className="mp-lbl-sm">SEALING ENCRYPTS YOUR WALLET ON THE SERVER. ONLY YOUR SEED REOPENS IT.</span>
-      </div>
+      <div style={{ padding: 16 }}><button className="mp-btn danger" onClick={onLogout}>SIGN OUT</button></div>
       <div style={{ padding: "8px 16px 20px", textAlign: "center" }}>
         <span onClick={onAdmin} className="mp-lbl-sm" style={{ userSelect: "none", cursor: "default", color: T.black, opacity: .5 }}>ZAIM v0.9.2</span>
       </div>

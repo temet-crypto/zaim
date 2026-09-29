@@ -542,7 +542,7 @@ export default function ZAIMGeoVault() {
         : vaults.length === 0 ? <div className="mp-band" style={{ textAlign: "center" }}><span className="mp-quip">No vaults yet. Drop one below.</span></div>
           : vaults.map(v => <VaultCard key={v.id} vault={v} now={now} onClick={vault => { setSelected(vault); setScreen("unlock"); }} onCancel={busy === v.id ? null : cancelVault} />)}
       <div className="mp-section" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span>OPEN DROPS NEAR YOU</span>
+        <span>FIND DROPS NEAR YOU</span>
         <button onClick={scanNearby} disabled={scanning} style={{ fontFamily: F.mono, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", background: T.white, color: T.blue, border: "none", padding: "3px 8px", cursor: "pointer" }}>{scanning ? "SCANNING…" : "SCAN"}</button>
       </div>
       {nearby === null

@@ -185,3 +185,13 @@ class TestSpendWindow:
 
     def test_default_window_is_ten_minutes(self):
         assert m.SPEND_WINDOW_SEC == 600
+
+
+class TestDefaultBirthday:
+    def test_ai_wallets_scan_from_ironwood(self, monkeypatch):
+        monkeypatch.setattr(m, "CHAIN_NAME", "mainnet")
+        assert m.default_birthday("zai_abc") == 3_428_143
+
+    def test_main_wallets_scan_from_sapling(self, monkeypatch):
+        monkeypatch.setattr(m, "CHAIN_NAME", "mainnet")
+        assert m.default_birthday("zw_abc") == 419_200

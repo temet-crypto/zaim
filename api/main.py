@@ -134,6 +134,18 @@ def seed_key(norm_seed, fp):
 # Shielded value could not exist before these heights, so there is nothing for
 # a viewing key to find below them.
 SAPLING_ACTIVATION = {"mainnet": 419_200, "testnet": 280_000}
+# NU6.3 (Ironwood) activation. The AI account launched after it, so no zai_
+# wallet can hold anything older: scanning from here instead of from Sapling
+# saves years of blocks on a restore that has no birthday.
+IRONWOOD_ACTIVATION = {"mainnet": 3_428_143}
+
+def default_birthday(wn):
+    """zingo v6 refuses a seed restore without --birthday (the old engine
+    silently scanned from Sapling). Pick the earliest height the wallet could
+    possibly have history at."""
+    if wn.startswith("zai_") and CHAIN_NAME in IRONWOOD_ACTIVATION:
+        return IRONWOOD_ACTIVATION[CHAIN_NAME]
+    return SAPLING_ACTIVATION.get(CHAIN_NAME, 419_200)
 
 def ufvk_fingerprint(ufvk):
     return hashlib.sha256(("zaim-ufvk-v1:" + ufvk.strip()).encode()).hexdigest()[:16]
@@ -692,17 +704,56 @@ async def auto_shield(wallet_name):
 
 # ── ZEC price (server-side cached; users' browsers never hit a price API, so no
 #    per-user IP leak to a third party — matters for a privacy app) ──────────────
-price_cache = {"usd": None, "usd_24h_change": None, "updated": 0.0}
+price_cache = {"usd": None, "usd_24h_change": None, "updated": 0.0, "source": None}
 PRICE_URL = ("https://api.coingecko.com/api/v3/simple/price"
              "?ids=zcash&vs_currencies=usd&include_24hr_change=true&include_last_updated_at=true")
 
-def _fetch_zec_price():
+KRAKEN_TICKER = "https://api.kraken.com/0/public/Ticker?pair=ZECUSD"
+KRAKEN_OHLC = "https://api.kraken.com/0/public/OHLC?pair=ZECUSD&interval=60"
+
+def _get_json(url):
     import urllib.request
-    req = urllib.request.Request(PRICE_URL, headers={"User-Agent": "zaim/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "zaim/1.0"})
     with urllib.request.urlopen(req, timeout=10) as r:
-        d = json.loads(r.read().decode())
-    z = d.get("zcash", {})
+        return json.loads(r.read().decode())
+
+def _fetch_coingecko():
+    z = _get_json(PRICE_URL).get("zcash", {})
     return z.get("usd"), z.get("usd_24h_change")
+
+def _fetch_kraken():
+    """Last trade, and the change against the hourly candle 24 hours back
+    (the ticker's own `o` is today's UTC open, not a rolling 24 hours)."""
+    t = _get_json(KRAKEN_TICKER)["result"]
+    last = float(next(iter(t.values()))["c"][0])
+    change = None
+    try:
+        o = _get_json(KRAKEN_OHLC)["result"]
+        candles = next(v for k, v in o.items() if k != "last")
+        cutoff = time.time() - 86400
+        past = [c for c in candles if c[0] <= cutoff]
+        if past:
+            then = float(past[-1][4])
+            change = (last - then) / then * 100 if then else None
+    except Exception:
+        pass
+    return last, change
+
+# CoinGecko's CDN blocks DigitalOcean's address range (403 from CloudFront since
+# 2026-09), so it cannot be the only source. First that answers wins.
+PRICE_SOURCES = (("coingecko", _fetch_coingecko), ("kraken", _fetch_kraken))
+
+def _fetch_zec_price():
+    last_err = None
+    for name, fetch in PRICE_SOURCES:
+        try:
+            usd, chg = fetch()
+            if usd is not None:
+                price_cache["source"] = name
+                return usd, chg
+        except Exception as e:
+            last_err = e
+    raise last_err or RuntimeError("no price source answered")
 
 async def update_price():
     loop = asyncio.get_event_loop()
@@ -1026,7 +1077,7 @@ async def _ensure_wallet_open(norm, wn, key, birthday=0):
             await loop.run_in_executor(None, unseal_wallet, wn, key)
         elif ZINGO_SESSIONS:
             await _restore_session(wn, {"ZINGO_SEED": norm},
-                                   ["--birthday", str(birthday)] if birthday > 0 else [],
+                                   ["--birthday", str(birthday if birthday > 0 else default_birthday(wn))],
                                    "Restore failed. Check the seed phrase and birthday, then try again")
             restored = True
         else:
@@ -2366,7 +2417,7 @@ async def get_price():
         "usd_24h_change": price_cache["usd_24h_change"],
         "updated_at": price_cache["updated"] or None,
         "age_seconds": int(age) if age is not None else None,
-        "source": "coingecko",
+        "source": price_cache.get("source"),
     }
 
 # ─── Swap · NEAR Intents 1Click ──────────────────────────────────────────────

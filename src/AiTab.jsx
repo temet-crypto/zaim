@@ -40,6 +40,13 @@ export default function AiTab({ aiReady, storeKey }) {
   };
   useEffect(refresh, [aiReady]);
 
+  // Declared before the effects that read them: a const used above its line
+  // throws on first render, which blanked this whole tab.
+  const mock = !quote?.relay_configured;
+  // New shielded funds land in Ironwood since NU6.3; the server sums the pools.
+  const spendable = balance?.shielded_balance ?? balance?.spendable_orchard_balance ?? balance?.orchard_balance ?? 0;
+  const totalZats = quote?.total_zats ?? 0;
+
   // Reply poller. Runs off the PERSISTED pending list, not component state, so
   // an answer still lands after a refresh, a crash, or a tab reopened hours
   // later — the question was paid for and the key outlives the page.
@@ -87,9 +94,6 @@ export default function AiTab({ aiReady, storeKey }) {
   }, [mock, aiReady, storeKey]);
   useEffect(() => { scroller.current?.scrollTo(0, 1e9); }, [msgs]);
 
-  const mock = !quote?.relay_configured;
-  const spendable = balance?.spendable_orchard_balance ?? balance?.orchard_balance ?? 0;
-  const totalZats = quote?.total_zats ?? 0;
 
   async function ask() {
     const q = input.trim();
@@ -178,7 +182,7 @@ export default function AiTab({ aiReady, storeKey }) {
         </div>
         <div style={{ textAlign: "right" }}>
           <Lbl>PER QUESTION</Lbl>
-          <div style={{ fontFamily: F.mono, fontSize: 13 }}>{quote ? `${(totalZats / 1e8).toFixed(5)} ZEC ≈ $${quote.total_usd}` : "…"}</div>
+          <div style={{ fontFamily: F.mono, fontSize: 13 }}>{quote?.total_usd != null ? `${(totalZats / 1e8).toFixed(5)} ZEC ≈ $${quote.total_usd}` : "…"}</div>
         </div>
         <button className="mp-link" onClick={() => setTopup(true)}>TOP UP</button>
       </div>
