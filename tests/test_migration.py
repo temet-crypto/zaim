@@ -221,3 +221,69 @@ class TestNewAddressShapes:
 
     def test_list_form(self):
         assert m._addr_from_new_address([{"encoded_address": "u1" + "a" * 60}]).startswith("u1")
+
+
+class _FakeSession:
+    def __init__(self, exc):
+        self.exc, self.ready = exc, True
+        self.stderr_tail = []
+
+    def run(self, *a, **k):
+        raise self.exc
+
+
+class TestSpendOutcomes:
+    """A spend that may have reached the network is never reported as a plain
+    failure: that invites the retry that pays twice."""
+
+    def call(self, exc, command="quicksend"):
+        with pytest.raises(HTTPException) as e:
+            m._zec_in_session(_FakeSession(exc), "zw_x", command, ["[]"])
+        return e.value.status_code
+
+    def test_engine_dying_mid_send_is_outcome_unknown(self):
+        assert self.call(m.zs.SessionDead("x")) == 502
+
+    def test_engine_dying_on_a_read_is_a_plain_retry(self):
+        assert self.call(m.zs.SessionDead("x"), command="balance") == 503
+
+    def test_unrecognised_send_error_is_outcome_unknown(self):
+        assert self.call(m.zs.CommandFailed("Error: something new broke after signing")) == 502
+
+    def test_a_refused_proposal_is_a_plain_failure(self):
+        assert self.call(m.zs.CommandFailed("Error: Send error.\ncaused by: Propose send error.\n"
+                                             "caused by: Insufficient balance")) == 500
+
+    def test_a_migration_transmission_error_is_outcome_unknown(self):
+        assert self.call(m.zs.CommandFailed("Transmission failed"), command="migration") == 502
+
+
+class TestSpendLock:
+    def test_the_key_stays_when_the_seal_fails(self, monkeypatch):
+        wn = "zw_aaaa000000000001"
+        os.makedirs(os.path.join(m.WDIR, wn), exist_ok=True)
+        m.wallet_keys[wn] = b"k" * 32
+        m.spend_windows[wn] = 0
+
+        async def no_seal(w):
+            return False
+        monkeypatch.setattr(m, "aseal", no_seal)
+        run(m.lock_spend_wallet(wn))
+        assert m.wallet_keys.get(wn) == b"k" * 32      # kept, so a later seal can work
+        assert m.spend_windows[wn] > m.time.time()      # and it will be retried
+
+
+class TestSyncGuard:
+    def test_one_sync_per_wallet_at_a_time(self, monkeypatch):
+        calls = []
+
+        async def slow(wn):
+            calls.append(wn)
+            await asyncio.sleep(0.05)
+            return {}, []
+        monkeypatch.setattr(m, "_sync_and_cache", slow)
+
+        async def both():
+            await asyncio.gather(m.sync_and_cache("zw_s"), m.sync_and_cache("zw_s"))
+        run(both())
+        assert calls == ["zw_s"]

@@ -80,6 +80,9 @@ class Session:
             argv, env={**env, "ZINGO_FRAMED": "1"},
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
+            # Its own process group: a signal aimed at the server (Ctrl-C, a
+            # group kill) must never reach zingo directly. It quits, it is not killed.
+            start_new_session=True,
         )
         threading.Thread(target=self._read_stdout, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()

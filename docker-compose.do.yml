@@ -12,6 +12,9 @@ services:
     image: zaim-zingo-api:latest
     container_name: zaim-api
     restart: unless-stopped
+    # zingo sessions must quit, never be killed: a zingo killed mid-sync leaves
+    # a stale sync flag in the wallet file. Docker kills after 10s by default.
+    stop_grace_period: 150s
     environment:
       - LIGHTWALLETD_SERVER=https://zec.rocks:443
       - WALLET_DIR=/app/wallets

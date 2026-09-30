@@ -13,7 +13,7 @@ import { apiGet, apiPost } from "./api.js";
 import { assembleReply, buildRequest, hex, parseReplyMemo, TYPE, MEMO_MAX } from "./ai/protocol.js";
 import { clearPending, listPending, savePending } from "./ai/store.js";
 import { convHash, newConvSecret, ZERO_CONV } from "./ai/derive.js";
-import { takeSeed } from "./ai/spendkey.js";
+import { takeSeed, canSpend, holdSeed } from "./ai/spendkey.js";
 
 const b64 = (u8) => btoa(String.fromCharCode(...u8));
 
@@ -30,6 +30,8 @@ export default function AiTab({ aiReady, storeKey }) {
   const [sheet, setSheet] = useState(false);
   const [topup, setTopup] = useState(false);
   const [topupAmt, setTopupAmt] = useState("0.005");
+  const [topupSeed, setTopupSeed] = useState("");   // view-key session with no seed held yet
+  const viewOnly = (() => { try { return localStorage.getItem("zaim_view_only") === "1"; } catch { return false; } })();
   const [toast, setToast] = useState("");
   const [closed, setClosed] = useState("");   // why the AI account is not usable, if it is not
   // A top-up on its way: { zats, base } where base is the balance when it was
@@ -159,11 +161,15 @@ export default function AiTab({ aiReady, storeKey }) {
   async function doTopup() {
     const zats = Math.round(parseFloat(topupAmt || "0") * 1e8);
     if (!zats || zats <= 0) return setTopupErr("Enter an amount");
+    // A view-key session signs with the seed held in this tab (never stored),
+    // or one typed here, which is held only once the server accepts it.
+    const typed = viewOnly && !takeSeed() ? topupSeed.trim() : "";
+    if (viewOnly && !takeSeed() && !typed) return setTopupErr("Enter your seed to send");
     setBusy(true); setTopupErr("");
     try {
-      // A view-key session signs with the seed held in this tab (never stored).
-      await apiPost("/ai/topup", { amount_zats: zats, seed_phrase: localStorage.getItem("zaim_view_only") === "1" ? (takeSeed() || "") : "" });
-      const a = { zats, base: spendable };
+      await apiPost("/ai/topup", { amount_zats: zats, seed_phrase: viewOnly ? (takeSeed() || typed) : "" });
+      if (typed) { holdSeed(typed); setTopupSeed(""); }
+      const a = { zats, base: spendable, at: Date.now() };
       setArriving(a);
       try { sessionStorage.setItem("zaim_ai_arriving", JSON.stringify(a)); } catch { }
       setTopup(false);
@@ -175,7 +181,8 @@ export default function AiTab({ aiReady, storeKey }) {
   // Clear the notice once the money has landed, and check every 30s until then.
   useEffect(() => {
     if (!arriving) return;
-    if (spendable > arriving.base) {
+    // Landed, or 30 minutes on with nothing: stop saying it is on its way.
+    if (spendable > arriving.base || Date.now() - (arriving.at || 0) > 30 * 60_000) {
       setArriving(null);
       try { sessionStorage.removeItem("zaim_ai_arriving"); } catch { }
       return;
@@ -187,7 +194,7 @@ export default function AiTab({ aiReady, storeKey }) {
   const newIdentity = () => {
     setConvSecret(newConvSecret());
     setMsgs([]);
-    say("New identity: fresh conversation secret, context cleared");
+    say("Cleared");
   };
 
   const st = { sending: T.blue, confirmed: T.teal, thinking: T.blue, answered: T.black, failed: T.signout };
@@ -196,7 +203,10 @@ export default function AiTab({ aiReady, storeKey }) {
     <div className="mp-scroll" style={{ display: "flex", flexDirection: "column" }}>
       <div className="mp-head">
         <div className="mp-title">AI</div>
-        <button className="mp-link" onClick={newIdentity}>CLEAR</button>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          {mock && <span className="mp-lbl-sm" style={{ color: T.blue }}>PREVIEW</span>}
+          <button className="mp-link" onClick={newIdentity}>CLEAR</button>
+        </div>
       </div>
 
       {closed && (
@@ -217,7 +227,7 @@ export default function AiTab({ aiReady, storeKey }) {
         </div>
         <div style={{ textAlign: "right" }}>
           <Lbl>PER QUESTION</Lbl>
-          <div style={{ fontFamily: F.mono, fontSize: 13 }}>{quote?.total_usd != null ? `${(totalZats / 1e8).toFixed(5)} ZEC ≈ $${Number(quote.total_usd).toFixed(2)}` : "…"}</div>
+          <div style={{ fontFamily: F.mono, fontSize: 13 }}>{quote?.total_usd != null ? `${(totalZats / 1e8).toFixed(5)} ZEC ≈ $${(Number(quote.total_usd) || 0).toFixed(2)}` : "…"}</div>
         </div>
         <button className="mp-link" onClick={() => setTopup(true)}>TOP UP</button>
       </div>
@@ -257,7 +267,7 @@ export default function AiTab({ aiReady, storeKey }) {
             {[["Your send fee", quote.send_fee_zats], ["Reply network cost", quote.reply_network_zats], ["Inference", quote.inference_zats], ["ZAIM fee", quote.zaim_fee_zats]].map(([k, v]) => (
               <div key={k} className="mp-kv"><span className="mp-kv-key">{k}</span><span className="mp-kv-val mono">{(v / 1e8).toFixed(6)} ZEC</span></div>
             ))}
-            <div className="mp-kv"><span className="mp-kv-key">Total</span><span className="mp-kv-val mono" style={{ color: T.blue }}>{(totalZats / 1e8).toFixed(6)} ZEC ≈ ${Number(quote.total_usd).toFixed(2)}</span></div>
+            <div className="mp-kv"><span className="mp-kv-key">Total</span><span className="mp-kv-val mono" style={{ color: T.blue }}>{(totalZats / 1e8).toFixed(6)} ZEC ≈ ${(Number(quote.total_usd) || 0).toFixed(2)}</span></div>
             <Lbl style={{ margin: "8px 0" }}>USD-QUOTED WITH A {Math.round((quote.buffer - 1) * 100)}% VOLATILITY BUFFER. FLAT FOR EVERYONE.</Lbl>
             <button className="mp-btn" onClick={ask} disabled={busy}>SEND SHIELDED</button>
           </div>
@@ -269,9 +279,14 @@ export default function AiTab({ aiReady, storeKey }) {
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 40 }} onClick={() => setTopup(false)}>
           <div style={{ background: T.off, border: `2px solid ${T.black}`, borderTop: `3px solid ${T.black}`, width: "100%", maxWidth: 424, boxSizing: "border-box", padding: 16 }} onClick={(e) => e.stopPropagation()}>
             <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 18, marginBottom: 6 }}>TOP UP AI ACCOUNT</div>
-            <Lbl style={{ marginBottom: 8 }}>INTERNAL SHIELDED TRANSFER FROM YOUR MAIN WALLET. THE AI ACCOUNT IS A SEPARATE SEED, DERIVED FROM YOURS — RECOVERABLE WITH THE SAME 24 WORDS.</Lbl>
+            <Lbl style={{ marginBottom: 8 }}>MOVES ZEC FROM YOUR MAIN WALLET TO YOUR AI ACCOUNT. YOUR 24 WORDS RECOVER BOTH.</Lbl>
             <input value={topupAmt} onChange={(e) => setTopupAmt(e.target.value)} inputMode="decimal"
               style={{ width: "100%", border: `2px solid ${T.black}`, padding: "10px 12px", fontFamily: F.mono, fontSize: 16, marginBottom: 10 }} />
+            {viewOnly && !canSpend() && (
+              <textarea value={topupSeed} onChange={(e) => setTopupSeed(e.target.value)} rows={2} placeholder="Your 24 words, to sign this send"
+                autoComplete="off" spellCheck={false}
+                style={{ width: "100%", border: `2px solid ${T.black}`, padding: "10px 12px", fontFamily: F.mono, fontSize: 14, marginBottom: 10, boxSizing: "border-box" }} />
+            )}
             {topupErr && <div style={{ background: T.red, color: T.white, fontFamily: F.body, fontSize: 14, padding: "10px 12px", marginBottom: 10 }}>{topupErr}</div>}
             <button className="mp-btn" onClick={doTopup} disabled={busy}>{busy ? "SENDING, THIS CAN TAKE 2 MINUTES" : "SEND TO AI ACCOUNT"}</button>
           </div>

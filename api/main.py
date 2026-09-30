@@ -157,8 +157,14 @@ def new_wallet_birthday():
     paid before it existed, so anywhere safely below today is correct; the
     library's release-stamped floor is correct too, but weeks old, and on this
     box a first sync from it took over an hour."""
-    tip = max(chain_tip.get("height", 0), estimated_tip())
-    return max(tip - NEW_WALLET_MARGIN, 0)
+    if chain_tip.get("height"):
+        return max(chain_tip["height"] - NEW_WALLET_MARGIN, 0)   # a real tip beats an estimate
+    ref = HEIGHT_REF.get(CHAIN_NAME)
+    est = estimated_tip()
+    # The clock estimate drifts if blocks run slower than 75s, so its margin
+    # grows with the blocks since the reference (3%), never below two days.
+    drift = int((est - ref[0]) * 0.03) if ref else 0
+    return max(est - NEW_WALLET_MARGIN - drift, 0)
 
 def default_birthday(wn):
     """zingo v6 refuses a seed restore without --birthday (the old engine
@@ -394,7 +400,11 @@ OFFLINE_OK = {"addresses", "t_addresses", "balance", "spendable_balance", "heigh
 SNAPSHOT_READS = {"addresses", "t_addresses", "balance", "spendable_balance", "height",
                   "notes", "value_transfers", "messages"}
 offline_snapshots = {}   # wn -> {(command, args): result}
-SPEND_COMMANDS = {"quicksend", "confirm", "quickshield", "transmit", "drain", "migrate"}
+SPEND_COMMANDS = {"quicksend", "confirm", "quickshield", "transmit", "drain", "migrate", "migration"}
+# zingo errors raised while proposing, before any transaction exists: the only
+# spend failures that are safe to report as "did not happen".
+PRE_BUILD_ERRORS = ("Propose send error", "Insufficient balance", "Invalid address",
+                    "invalid address", "not a valid", "Parse error", "Review the plan")
 OUTCOME_UNKNOWN = ("The network did not confirm this transaction, but it may still go through. "
                    "Check your transactions before sending again")
 
@@ -428,7 +438,9 @@ def _clean_cli_output(out):
 
 # A seed is 12 to 24 lowercase words. Anything that shape, in text on its way to
 # a client, is treated as key material and never sent.
-_SEED_SHAPE = re.compile(r"\b[a-z]+(?: [a-z]+){11,32}\b")
+# Words joined by spaces, commas, quotes or brackets: a seed can come back as a
+# JSON array or a numbered list too.
+_SEED_SHAPE = re.compile(r"\b[a-z]{3,8}(?:[\s,\"'\[\]0-9.]+[a-z]{3,8}){11,32}\b")
 
 def _safe_cli_error(text):
     """Sanitize CLI output before it can reach a client: drop seed-shaped runs and
@@ -507,9 +519,9 @@ def _zec_in_session(s, wn, command, args=None):
     except zs.CommandFailed as e:
         text = str(e)
         print(f"[session] {wn} {command}: {_SEED_SHAPE.sub('[redacted]', text)[:600]}", flush=True)
-        if command in SPEND_COMMANDS and "Transmission" in text:
-            # Built, signed, and handed to the mixnet, but no indexer confirmed
-            # it. Seen on testnet: this error, and the transaction mined anyway.
+        if command in SPEND_COMMANDS and not any(k in text for k in PRE_BUILD_ERRORS):
+            # Anything past the proposal may have reached the network. Seen on
+            # testnet: "Transmission failed", and the transaction mined anyway.
             # Reporting it as a failure invites a retry that pays twice.
             raise HTTPException(502, detail=OUTCOME_UNKNOWN)
         raise HTTPException(500, detail="CLI error: " + _safe_cli_error(text))
@@ -518,6 +530,9 @@ def _zec_in_session(s, wn, command, args=None):
     except zs.SessionDead:
         tail = " | ".join(list(s.stderr_tail)[-5:])
         print(f"[session] {wn} died: {_safe_cli_error(tail)}", flush=True)
+        if command in SPEND_COMMANDS:
+            # It may have died after broadcasting. Never invite a retry.
+            raise HTTPException(502, detail=OUTCOME_UNKNOWN)
         raise HTTPException(503, detail="The wallet engine restarted. Try again")
 
 def close_session(wn):
@@ -561,9 +576,13 @@ async def azec(wn, cmd, args=None):
     # one-shots; a live session orders its own commands, so a slow send does
     # not hold every read of the same wallet hostage.
     async with _wlock(wn):
-        if wn.startswith(("zw_", "zai_", "zv_")) and not os.path.isdir(os.path.join(WDIR, wn)):
-            raise HTTPException(409, detail="wallet is sealed")
         s = POOL.get(wn)
+        # The wallet FILE, not just the dir: a dir that holds only a stray
+        # zaim file would make zingo create a brand new wallet whose seed
+        # nobody has, and show it as this user's.
+        if wn.startswith(("zw_", "zai_", "zv_")) and s is None and \
+                not os.path.exists(os.path.join(WDIR, wn, "zingo-wallet.dat")):
+            raise HTTPException(409, detail="wallet is sealed")
         if s is None:
             if cmd in OFFLINE_OK or cmd == "save":
                 if cmd == "save":
@@ -688,7 +707,20 @@ chain_tip = {"height": 0}   # highest height any session has reported
 sync_notes = {}             # wn -> last logged poll/run reply, to log changes only
 sync_progress = {}          # wn -> percent scanned while a sync is running
 
+_syncing = set()
+
 async def sync_and_cache(wallet_name):
+    """One at a time per wallet: callers fire this on every stale read, and
+    without a guard a polling UI could fill the engine thread pool."""
+    if wallet_name in _syncing:
+        return None, None
+    _syncing.add(wallet_name)
+    try:
+        return await _sync_and_cache(wallet_name)
+    finally:
+        _syncing.discard(wallet_name)
+
+async def _sync_and_cache(wallet_name):
     # Never operate on a wallet that is sealed or gone: the CLI would
     # silently create a FRESH wallet in an empty HOME (post-logout race).
     if not os.path.isdir(os.path.join(WDIR, wallet_name)):
@@ -841,6 +873,12 @@ async def periodic_reap():
         if not ZINGO_SESSIONS:
             continue
         now = time.time()
+        try:
+            await _reap_once(loop, now)
+        except Exception as e:
+            print(f"[reap] {e!r}"[:300], flush=True)
+
+async def _reap_once(loop, now):
         for wn in POOL.names():
             s = POOL.get(wn)
             if not s or s.pending:
@@ -1151,8 +1189,9 @@ async def _restore_session(wn, extra_env, extra_args, fail_detail):
             raise HTTPException(500, detail=fail_detail)
         except zs.CommandTimeout:
             pass  # still bootstrapping; the session stays and finishes on its own
-        except zs.CommandFailed:
-            pass  # e.g. no height before the first sync block; the wallet exists
+        except zs.CommandFailed as e:
+            # Often just "no height yet" before the first block; log it anyway.
+            print(f"[restore] {wn}: {_SEED_SHAPE.sub('[redacted]', str(e))[:200]}", flush=True)
         wallet_activity[wn] = time.time()
 
 async def _ensure_wallet_open(norm, wn, key, birthday=0):
@@ -1233,11 +1272,18 @@ SPEND_WINDOW_SEC = int(os.getenv("ZAIM_SPEND_WINDOW_MIN", "10")) * 60
 spend_windows = {}   # spend wallet -> unix time its window closes
 
 async def lock_spend_wallet(wn):
-    spend_windows.pop(wn, None)
+    """Seal the spend wallet. The key is dropped only once the seal worked:
+    dropping it after a failed seal left a spend-capable wallet in plaintext
+    that nothing could ever seal again."""
+    sealed = False
     try:
-        await aseal(wn)
+        sealed = await aseal(wn)
     finally:
-        wallet_keys.pop(wn, None)
+        if sealed or not os.path.isdir(os.path.join(WDIR, wn)):
+            spend_windows.pop(wn, None)
+            wallet_keys.pop(wn, None)
+        else:
+            spend_windows[wn] = time.time() + 60   # busy: try again in a minute
 
 async def periodic_spend_lock():
     """Seal a view-key session's spend wallet when its window lapses. A wallet
@@ -1278,7 +1324,7 @@ async def _spend_once(session, req: SpendReq):
         result = await azec(wn, "quicksend", [json.dumps(req.outputs)])
         txid = _extract_txid(result)
         if not txid:
-            raise HTTPException(500, detail="The send did not return a txid. Check your transactions before retrying")
+            raise HTTPException(502, detail=OUTCOME_UNKNOWN)
         session["spend_wallet"] = wn
         save_sessions()
         return txid
@@ -2401,7 +2447,7 @@ async def ai_topup(req: AiTopupReq, session=Depends(get_session)):
     result = await azec(session["wallet_name"], "quicksend", [json.dumps(outputs)])
     txid = _extract_txid(result)
     if not txid:
-        raise HTTPException(500, detail="Top-up did not return a txid")
+        raise HTTPException(502, detail=OUTCOME_UNKNOWN)
     return {"txid": txid, "amount_zats": req.amount_zats}
 
 @app.post("/api/ai/send")

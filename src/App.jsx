@@ -435,7 +435,7 @@ function HomeScreen({ onNav }) {
         </div>
         {bal.pending > 0 && (
           <div className="mp-lbl-sm" style={{ marginTop: 10, color: T.blue }}>
-            +{(bal.pending / 1e8).toFixed(4)} ZEC ARRIVING, WAITING FOR CONFIRMATION
+            {(bal.pending / 1e8).toFixed(4)} ZEC WAITING FOR CONFIRMATION
           </div>
         )}
       </div>
@@ -496,7 +496,8 @@ function HomeScreen({ onNav }) {
         const shield = kind === "shield";
         const self = kind.includes("self") || shield;
         const isIn = !self && !kind.startsWith("sen");
-        const pending = tx.status === "mempool" || tx.status === "pending";
+        // zingo v6 also reports calculated and transmitted for a send in flight.
+        const pending = !!tx.status && !/^(confirmed|failed)/i.test(String(tx.status));
         tx.memo = (tx.memo || (Array.isArray(tx.memos) && tx.memos.length ? tx.memos[0] : "") || "").split("\nReply-to:")[0];
         if (tx.memo.startsWith("zaim-sync:")) tx.memo = "contact sync";
         if (tx.memo.startsWith("zaim-vault:")) tx.memo = "vault funding";
@@ -972,6 +973,7 @@ export default function ZaimApp() {
     forgetSeed();
     localStorage.removeItem("zaim_token"); localStorage.removeItem("zaim_user");
     localStorage.removeItem("zaim_view_only");
+    try { sessionStorage.removeItem("zaim_ai_arriving"); } catch (e) { }
     setAuthed(false); setScreen("home");
   };
   const render = () => {

@@ -16,7 +16,12 @@ import { T, F } from "./styles/maxpain.js";
 import { apiGet, apiPost } from "./api.js";
 import { takeSeed, canSpend, holdSeed } from "./ai/spendkey.js";
 
-const zec = (zats) => ((zats || 0) / 1e8).toFixed(4);
+// Four decimals for the big numbers; small ones (fees, what stays behind)
+// keep every digit so they never read as a false 0.0000.
+const zec = (zats) => {
+  const v = (zats || 0) / 1e8;
+  return v !== 0 && Math.abs(v) < 0.001 ? v.toFixed(8).replace(/0+$/, "") : v.toFixed(4);
+};
 
 function when(unix) {
   if (!unix) return "";
@@ -58,10 +63,11 @@ export default function Ironwood({ onBack }) {
   const [done, setDone] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [pollErr, setPollErr] = useState("");   // from the 60s poll; clears when a poll works
   const [seedIn, setSeedIn] = useState("");
 
   const refresh = useCallback(async () => {
-    try { setStatus(await apiGet("/migration/status")); } catch (e) { setErr(e.message); }
+    try { setStatus(await apiGet("/migration/status")); setPollErr(""); } catch (e) { setPollErr(e.message); }
   }, []);
 
   // Polling does double duty: fresh progress, and the activity that keeps the
@@ -73,17 +79,20 @@ export default function Ironwood({ onBack }) {
   }, [refresh]);
 
   const needsSeed = status?.view_only && !status?.unlocked && !canSpend();
+  // The seed is held for later sends only after the server has accepted it:
+  // holding a mistyped one would hide the box and reuse the typo everywhere.
   const seed = () => {
     if (!status?.view_only || status?.unlocked) return "";
-    const s = takeSeed() || seedIn.trim();
-    if (s) holdSeed(s);
-    return s;
+    return takeSeed() || seedIn.trim();
   };
 
   const review = async (mode) => {
+    if (needsSeed && !seedIn.trim()) { setErr("Enter your seed first"); return; }
     setBusy(true); setErr(""); setPlan(null);
     try {
+      const typed = !takeSeed() && seedIn.trim();
       setPlan(await apiPost("/migration/plan", { mode, seed_phrase: seed() }));
+      if (typed) { holdSeed(seedIn.trim()); setSeedIn(""); }
     } catch (e) { setErr(e.message); }
     setBusy(false);
   };
@@ -121,8 +130,9 @@ export default function Ironwood({ onBack }) {
     </div>
   );
 
-  const errBand = err && (
-    <div className="mp-band" style={{ background: T.red, color: T.white, fontFamily: F.body, fontSize: 14 }}>{err}</div>
+  const shown = err || pollErr;
+  const errBand = shown && (
+    <div className="mp-band" style={{ background: T.red, color: T.white, fontFamily: F.body, fontSize: 14 }}>{shown}</div>
   );
 
   if (!status) return <div className="mp-scroll">{head}{errBand}<div className="mp-band"><span className="mp-quip">Checking your wallet…</span></div></div>;
@@ -159,7 +169,7 @@ export default function Ironwood({ onBack }) {
         <Row k="Moved" v={`${zec(status.value_migrated)} of ${zec(status.value_total)} ZEC`} />
         <Row k="Left in Orchard" v={`${zec(status.orchard_zats)} ZEC`} />
         {status.next_window_unix && <Row k="Next transfer" v={when(status.next_window_unix)} color={T.blue} />}
-        {status.finish_by_unix && <Row k="Done by" v={when(status.finish_by_unix)} />}
+        {status.finish_by_unix && <Row k="Finishes" v={when(status.finish_by_unix)} />}
         <div className="mp-band">
           <div className="mp-quip-sm">
             {splitting
