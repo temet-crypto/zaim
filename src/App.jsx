@@ -9,7 +9,6 @@ import AiTab from "./AiTab.jsx";
 import Inscriptions from "./Inscriptions.jsx";
 import Ironwood from "./Ironwood.jsx";
 import { deriveAiMnemonic, deriveStoreKey } from "./ai/derive.js";
-import { ufvkFromSeed, prewarm as prewarmKeys } from "./ai/ufvk.js";
 import { holdSeed, takeSeed, canSpend, forgetSeed } from "./ai/spendkey.js";
 import { QRCodeSVG } from "qrcode.react";
 
@@ -160,7 +159,6 @@ function AuthScreen({ onAuth }) {
   }, []);
   // Fetch the key-derivation wasm while the user is still typing, so signing
   // in does not stall on a 1.7 MB download.
-  useEffect(() => { if (mode === "open") prewarmKeys(); }, [mode]);
   const submit = async () => {
     setError("");
     if (mode === "open" && seedIn.trim().split(/\s+/).length < 12) return setError("Paste your full seed phrase");
@@ -175,19 +173,11 @@ function AuthScreen({ onAuth }) {
       } else {
         const phrase = seedIn.trim();
         const bd = parseInt(birthday) || parseInt(localStorage.getItem("zaim_birthday") || "0") || 0;
-        try {
-          // The seed goes into wasm and a viewing key comes out. Only the
-          // viewing key is sent. Watch the network tab: no seed leaves here.
-          const ufvk = await ufvkFromSeed(phrase, ZCASH_NETWORK);
-          res = await API.openView(ufvk, bd);
-          holdSeed(phrase); // memory only, for sends; never written to disk
-        } catch (e) {
-          // Browsers without wasm, and any derivation failure, fall back to the
-          // old path rather than locking someone out of their money. It is
-          // strictly worse for privacy, so the session says so out loud.
-          console.warn("view-key sign in unavailable, using seed:", e?.message || e);
-          res = await API.openWallet(phrase, bd);
-        }
+        // Signed in means able to send: the seed opens the wallet on the server
+        // for this session, so nothing asks for it again until sign out or the
+        // 30 minute idle seal (Dusty, 2026-09-30). The view-key path stays in
+        // the API (open_view) but sign in no longer uses it.
+        res = await API.openWallet(phrase, bd);
       }
       localStorage.setItem("zaim_token", res.token);
       if (res.view_only) localStorage.setItem("zaim_view_only", "1");

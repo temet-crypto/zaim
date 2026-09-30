@@ -272,7 +272,7 @@ export default function FeaturesScreen({ onBack }) {
         <MessagesVisual />
       </Feature>
 
-      <Feature n="02" name="Anonymous AI" tag="PREVIEW" tagColor={T.blue}
+      <Feature n="02" name="Anonymous AI" tag="LIVE" tagColor={T.teal}
         desc="Ask an AI a question from a separate account with its own seed. The question is sealed on your device, travels as a shielded transaction, and the answer comes back encrypted to a key only this browser holds.">
         <AiVisual />
       </Feature>
@@ -323,30 +323,25 @@ export default function FeaturesScreen({ onBack }) {
       <div className="mp-band mp-band-w">
         <div className="mp-quip">Read this before you put real money in. It is the part most wallets bury.</div>
       </div>
-      <Claim n="01" head="Signing in no longer sends us your seed">
-        Your seed stays in your browser. It goes into a key derivation that runs on your own
-        device, and only the viewing key that comes out is sent to us. A viewing key lets us
-        sync your wallet, show your balance and read your memos. It cannot move money, and
-        that is arithmetic, not a promise we are making. Open the network tab and check.
+      <Claim n="01" head="Signed in means you can send">
+        When you sign in, your seed goes to our server and opens your wallet there. That is
+        why you never type it again to send, message or top up. It also means that while you
+        are signed in, this server could move your money. Most wallets do not say that. We do.
       </Claim>
-      <Claim n="02" head="Sending is the exception, and it has a time limit">
-        Because we hold no spending key, a payment needs one. Your seed is sent with it and
-        opens your wallet for spending, and it stays open for 10 minutes after your last
-        payment so a conversation does not wait on every message. Then it is sealed again, and
-        signing out seals it at once. So the window where this server could spend your funds is
-        10 minutes after each payment rather than your whole session. It is smaller. It is not
-        zero, and we will not pretend it is. Closing the tab drops the seed from your browser,
-        which is why sending again after a reload asks once more.
+      <Claim n="02" head="Signing out locks it">
+        Sign out, or leave the app alone for 30 minutes, and your wallet is locked with a key
+        made from your seed. After that the server cannot open it or move anything until you
+        sign in again.
       </Claim>
       <Claim n="03" head="Sealed means sealed">
         When you sign out, or after 30 idle minutes, your wallet is encrypted and the plaintext
-        is deleted. The key comes from your viewing key, so it arrives with you and leaves with
+        is deleted. The key comes from your seed, so it arrives with you and leaves with
         you. Someone who steals the disk gets ciphertext. Be clear on the limit though: anyone
         who can replay your sign in holds that key, so this protects a stolen disk, not a
         compromised server.
       </Claim>
       <Claim n="04" head="You can leave whenever you want">
-        Your seed is a standard Zcash seed. Type it into Zashi, Ywallet or any other Zcash wallet and you get the same funds and the same history. Nothing here is locked to us.
+        Your seed is a standard Zcash seed. Type it into Zodl, Ywallet or any other Zcash wallet and you get the same funds and the same history. Nothing here is locked to us.
       </Claim>
       <Claim n="05" head="The AI tab knows less about you than we do">
         Questions are sealed in your browser before they reach us, so our server carries
