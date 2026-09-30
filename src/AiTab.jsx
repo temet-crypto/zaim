@@ -217,7 +217,7 @@ export default function AiTab({ aiReady, storeKey }) {
         </div>
         <div style={{ textAlign: "right" }}>
           <Lbl>PER QUESTION</Lbl>
-          <div style={{ fontFamily: F.mono, fontSize: 13 }}>{quote?.total_usd != null ? `${(totalZats / 1e8).toFixed(5)} ZEC ≈ $${quote.total_usd}` : "…"}</div>
+          <div style={{ fontFamily: F.mono, fontSize: 13 }}>{quote?.total_usd != null ? `${(totalZats / 1e8).toFixed(5)} ZEC ≈ $${Number(quote.total_usd).toFixed(2)}` : "…"}</div>
         </div>
         <button className="mp-link" onClick={() => setTopup(true)}>TOP UP</button>
       </div>
@@ -257,7 +257,7 @@ export default function AiTab({ aiReady, storeKey }) {
             {[["Your send fee", quote.send_fee_zats], ["Reply network cost", quote.reply_network_zats], ["Inference", quote.inference_zats], ["ZAIM fee", quote.zaim_fee_zats]].map(([k, v]) => (
               <div key={k} className="mp-kv"><span className="mp-kv-key">{k}</span><span className="mp-kv-val mono">{(v / 1e8).toFixed(6)} ZEC</span></div>
             ))}
-            <div className="mp-kv"><span className="mp-kv-key">Total</span><span className="mp-kv-val mono" style={{ color: T.blue }}>{(totalZats / 1e8).toFixed(6)} ZEC ≈ ${quote.total_usd}</span></div>
+            <div className="mp-kv"><span className="mp-kv-key">Total</span><span className="mp-kv-val mono" style={{ color: T.blue }}>{(totalZats / 1e8).toFixed(6)} ZEC ≈ ${Number(quote.total_usd).toFixed(2)}</span></div>
             <Lbl style={{ margin: "8px 0" }}>USD-QUOTED WITH A {Math.round((quote.buffer - 1) * 100)}% VOLATILITY BUFFER. FLAT FOR EVERYONE.</Lbl>
             <button className="mp-btn" onClick={ask} disabled={busy}>SEND SHIELDED</button>
           </div>
