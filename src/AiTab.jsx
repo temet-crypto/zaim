@@ -14,6 +14,7 @@ import { assembleReply, buildRequest, hex, parseReplyMemo, TYPE, MEMO_MAX } from
 import { clearPending, listPending, savePending } from "./ai/store.js";
 import { convHash, newConvSecret, ZERO_CONV } from "./ai/derive.js";
 import { takeSeed, canSpend, holdSeed } from "./ai/spendkey.js";
+import { QRCodeSVG } from "qrcode.react";
 
 const b64 = (u8) => btoa(String.fromCharCode(...u8));
 
@@ -31,6 +32,14 @@ export default function AiTab({ aiReady, storeKey }) {
   const [topup, setTopup] = useState(false);
   const [topupAmt, setTopupAmt] = useState("0.005");
   const [topupSeed, setTopupSeed] = useState("");   // view-key session with no seed held yet
+  // The AI account's own shielded address: funding it from any Zcash wallet
+  // needs no seed at all, and does not tie it to the ZAIM main wallet.
+  const [aiAddr, setAiAddr] = useState("");
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!topup || aiAddr) return;
+    apiPost("/ai/address", {}).then((r) => setAiAddr(r.address || "")).catch(() => {});
+  }, [topup, aiAddr]);
   const viewOnly = (() => { try { return localStorage.getItem("zaim_view_only") === "1"; } catch { return false; } })();
   const [toast, setToast] = useState("");
   const [closed, setClosed] = useState("");   // why the AI account is not usable, if it is not
@@ -279,7 +288,25 @@ export default function AiTab({ aiReady, storeKey }) {
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 40 }} onClick={() => setTopup(false)}>
           <div style={{ background: T.off, border: `2px solid ${T.black}`, borderTop: `3px solid ${T.black}`, width: "100%", maxWidth: 424, boxSizing: "border-box", padding: 16 }} onClick={(e) => e.stopPropagation()}>
             <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 18, marginBottom: 6 }}>TOP UP AI ACCOUNT</div>
-            <Lbl style={{ marginBottom: 8 }}>MOVES ZEC FROM YOUR MAIN WALLET TO YOUR AI ACCOUNT. YOUR 24 WORDS RECOVER BOTH.</Lbl>
+            <Lbl style={{ marginBottom: 8, color: T.blue }}>SEND FROM ANY ZCASH WALLET</Lbl>
+            {aiAddr ? (
+              <div style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 8 }}>
+                <div style={{ border: `2px solid ${T.black}`, padding: 6, background: T.white, flexShrink: 0 }}>
+                  <QRCodeSVG value={`zcash:${aiAddr}`} size={96} />
+                </div>
+                <div style={{ minWidth: 0 }}>
+                  <div className="mp-mono" style={{ fontSize: 11, wordBreak: "break-all", lineHeight: 1.4 }}>{aiAddr}</div>
+                  <button className="mp-link" style={{ marginTop: 6 }} onClick={() => {
+                    navigator.clipboard?.writeText(aiAddr); setCopied(true); setTimeout(() => setCopied(false), 1500);
+                  }}>{copied ? "COPIED" : "COPY"}</button>
+                </div>
+              </div>
+            ) : <div className="mp-lbl-sm" style={{ marginBottom: 8 }}>Loading address…</div>}
+            <div style={{ fontFamily: F.body, fontSize: 13, lineHeight: 1.5, marginBottom: 14 }}>
+              No seed needed. Use a shielded wallet like Zodl or Zingo. Exchanges like Coinbase cannot send here.
+            </div>
+            <div style={{ borderTop: `2px solid ${T.black}`, margin: "0 -16px 12px" }} />
+            <Lbl style={{ marginBottom: 8, color: T.blue }}>OR MOVE FROM YOUR ZAIM WALLET</Lbl>
             <input value={topupAmt} onChange={(e) => setTopupAmt(e.target.value)} inputMode="decimal"
               style={{ width: "100%", border: `2px solid ${T.black}`, padding: "10px 12px", fontFamily: F.mono, fontSize: 16, marginBottom: 10 }} />
             {viewOnly && !canSpend() && (
