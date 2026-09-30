@@ -13,7 +13,6 @@ import { apiGet, apiPost } from "./api.js";
 import { assembleReply, buildRequest, hex, parseReplyMemo, TYPE, MEMO_MAX } from "./ai/protocol.js";
 import { clearPending, listPending, savePending } from "./ai/store.js";
 import { convHash, newConvSecret, ZERO_CONV } from "./ai/derive.js";
-import { takeSeed, canSpend, holdSeed } from "./ai/spendkey.js";
 import { QRCodeSVG } from "qrcode.react";
 
 const b64 = (u8) => btoa(String.fromCharCode(...u8));
@@ -30,8 +29,6 @@ export default function AiTab({ aiReady, storeKey }) {
   const [convSecret, setConvSecret] = useState(() => newConvSecret());
   const [sheet, setSheet] = useState(false);
   const [topup, setTopup] = useState(false);
-  const [topupAmt, setTopupAmt] = useState("0.005");
-  const [topupSeed, setTopupSeed] = useState("");   // view-key session with no seed held yet
   // The AI account's own shielded address: funding it from any Zcash wallet
   // needs no seed at all, and does not tie it to the ZAIM main wallet.
   const [aiAddr, setAiAddr] = useState("");
@@ -40,15 +37,8 @@ export default function AiTab({ aiReady, storeKey }) {
     if (!topup || aiAddr) return;
     apiPost("/ai/address", {}).then((r) => setAiAddr(r.address || "")).catch(() => {});
   }, [topup, aiAddr]);
-  const viewOnly = (() => { try { return localStorage.getItem("zaim_view_only") === "1"; } catch { return false; } })();
   const [toast, setToast] = useState("");
   const [closed, setClosed] = useState("");   // why the AI account is not usable, if it is not
-  // A top-up on its way: { zats, base } where base is the balance when it was
-  // sent. Kept in sessionStorage so a reload still says what is happening.
-  const [arriving, setArriving] = useState(() => {
-    try { return JSON.parse(sessionStorage.getItem("zaim_ai_arriving") || "null"); } catch { return null; }
-  });
-  const [topupErr, setTopupErr] = useState("");
   const [busy, setBusy] = useState(false);
   const scroller = useRef(null);
 
@@ -167,38 +157,6 @@ export default function AiTab({ aiReady, storeKey }) {
     return Uint8Array.from(h.match(/../g) ?? [], (x) => parseInt(x, 16));
   }
 
-  async function doTopup() {
-    const zats = Math.round(parseFloat(topupAmt || "0") * 1e8);
-    if (!zats || zats <= 0) return setTopupErr("Enter an amount");
-    // A view-key session signs with the seed held in this tab (never stored),
-    // or one typed here, which is held only once the server accepts it.
-    const typed = viewOnly && !takeSeed() ? topupSeed.trim() : "";
-    if (viewOnly && !takeSeed() && !typed) return setTopupErr("Enter your seed to send");
-    setBusy(true); setTopupErr("");
-    try {
-      await apiPost("/ai/topup", { amount_zats: zats, seed_phrase: viewOnly ? (takeSeed() || typed) : "" });
-      if (typed) { holdSeed(typed); setTopupSeed(""); }
-      const a = { zats, base: spendable, at: Date.now() };
-      setArriving(a);
-      try { sessionStorage.setItem("zaim_ai_arriving", JSON.stringify(a)); } catch { }
-      setTopup(false);
-      setTimeout(refresh, 4000);
-    } catch (e) { setTopupErr(e.message || "The top up did not go through"); }
-    setBusy(false);
-  }
-
-  // Clear the notice once the money has landed, and check every 30s until then.
-  useEffect(() => {
-    if (!arriving) return;
-    // Landed, or 30 minutes on with nothing: stop saying it is on its way.
-    if (spendable > arriving.base || Date.now() - (arriving.at || 0) > 30 * 60_000) {
-      setArriving(null);
-      try { sessionStorage.removeItem("zaim_ai_arriving"); } catch { }
-      return;
-    }
-    const t = setInterval(refresh, 30_000);
-    return () => clearInterval(t);
-  }, [arriving, spendable]);
 
   const newIdentity = () => {
     setConvSecret(newConvSecret());
@@ -220,12 +178,6 @@ export default function AiTab({ aiReady, storeKey }) {
 
       {closed && (
         <div className="mp-band" style={{ background: T.red, color: T.white, fontFamily: F.body, fontSize: 14, lineHeight: 1.5 }}>{closed}</div>
-      )}
-
-      {arriving && (
-        <div className="mp-band" style={{ background: T.teal, color: T.black, fontFamily: F.body, fontSize: 14, lineHeight: 1.5 }}>
-          Sent {(arriving.zats / 1e8).toFixed(4)} ZEC to your AI account. It shows here in a few minutes.
-        </div>
       )}
 
       {/* balance strip */}
@@ -302,20 +254,9 @@ export default function AiTab({ aiReady, storeKey }) {
                 </div>
               </div>
             ) : <div className="mp-lbl-sm" style={{ marginBottom: 8 }}>Loading address…</div>}
-            <div style={{ fontFamily: F.body, fontSize: 13, lineHeight: 1.5, marginBottom: 14 }}>
+            <div style={{ fontFamily: F.body, fontSize: 13, lineHeight: 1.5 }}>
               No seed needed. Use a shielded wallet like Zodl or Zingo. Exchanges like Coinbase cannot send here.
             </div>
-            <div style={{ borderTop: `2px solid ${T.black}`, margin: "0 -16px 12px" }} />
-            <Lbl style={{ marginBottom: 8, color: T.blue }}>OR MOVE FROM YOUR ZAIM WALLET</Lbl>
-            <input value={topupAmt} onChange={(e) => setTopupAmt(e.target.value)} inputMode="decimal"
-              style={{ width: "100%", border: `2px solid ${T.black}`, padding: "10px 12px", fontFamily: F.mono, fontSize: 16, marginBottom: 10 }} />
-            {viewOnly && !canSpend() && (
-              <textarea value={topupSeed} onChange={(e) => setTopupSeed(e.target.value)} rows={2} placeholder="Your 24 words, to sign this send"
-                autoComplete="off" spellCheck={false}
-                style={{ width: "100%", border: `2px solid ${T.black}`, padding: "10px 12px", fontFamily: F.mono, fontSize: 14, marginBottom: 10, boxSizing: "border-box" }} />
-            )}
-            {topupErr && <div style={{ background: T.red, color: T.white, fontFamily: F.body, fontSize: 14, padding: "10px 12px", marginBottom: 10 }}>{topupErr}</div>}
-            <button className="mp-btn" onClick={doTopup} disabled={busy}>{busy ? "SENDING, THIS CAN TAKE 2 MINUTES" : "SEND TO AI ACCOUNT"}</button>
           </div>
         </div>
       )}
