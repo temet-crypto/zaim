@@ -375,6 +375,12 @@ function HomeScreen({ onNav }) {
     } catch (e) { } setLoading(false);
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
+  // While the wallet is catching up, keep the number and the progress line fresh.
+  useEffect(() => {
+    if (!balance || balance.syncing == null) return;
+    const t = setInterval(refresh, 30_000);
+    return () => clearInterval(t);
+  }, [balance, refresh]);
   useEffect(() => {
     let alive = true;
     const loadPrice = async () => { try { const p = await API.getPrice(); if (alive) setPrice(p); } catch (e) { } };
@@ -423,6 +429,11 @@ function HomeScreen({ onNav }) {
           <span className="mp-lbl">ZEC TOTAL</span>
           {usdVal != null && <span style={{ fontFamily: F.mono, fontSize: 12, color: T.black }}>≈ {fmtUsd(usdVal)} USD</span>}
         </div>
+        {balance && balance.syncing != null && (
+          <div className="mp-lbl-sm" style={{ marginTop: 10, color: T.blue }}>
+            CATCHING UP WITH THE NETWORK, {Math.floor(balance.syncing)}%. SENDING WORKS WHEN THIS FINISHES
+          </div>
+        )}
         {bal.pending > 0 && (
           <div className="mp-lbl-sm" style={{ marginTop: 10, color: T.blue }}>
             {(bal.pending / 1e8).toFixed(4)} ZEC WAITING FOR CONFIRMATION

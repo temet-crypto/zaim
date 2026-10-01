@@ -251,8 +251,16 @@ class TestSpendOutcomes:
         assert self.call(m.zs.CommandFailed("Error: something new broke after signing")) == 502
 
     def test_a_refused_proposal_is_a_plain_failure(self):
+        m.sync_progress.pop("zw_x", None)
         assert self.call(m.zs.CommandFailed("Error: Send error.\ncaused by: Propose send error.\n"
-                                             "caused by: Insufficient balance")) == 500
+                                             "caused by: Insufficient balance")) == 400
+
+    def test_insufficient_while_catching_up_says_so(self):
+        m.sync_progress["zw_x"] = 12.0
+        try:
+            assert self.call(m.zs.CommandFailed("Propose send error. Insufficient balance (have 0")) == 409
+        finally:
+            m.sync_progress.pop("zw_x", None)
 
     def test_a_migration_transmission_error_is_outcome_unknown(self):
         assert self.call(m.zs.CommandFailed("Transmission failed"), command="migration") == 502

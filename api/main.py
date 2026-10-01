@@ -524,6 +524,13 @@ def _zec_in_session(s, wn, command, args=None):
             # testnet: "Transmission failed", and the transaction mined anyway.
             # Reporting it as a failure invites a retry that pays twice.
             raise HTTPException(502, detail=OUTCOME_UNKNOWN)
+        if command in SPEND_COMMANDS and "Insufficient balance" in text:
+            # Plain words, not the engine's. "have 0" right after sign in is
+            # almost always a wallet still catching up, not an empty one.
+            if wn in sync_progress or not s.ready:
+                raise HTTPException(409, detail="Your wallet is still catching up with the network. "
+                                                "Try again in a few minutes")
+            raise HTTPException(400, detail="Not enough ZEC for this amount plus the network fee")
         raise HTTPException(500, detail="CLI error: " + _safe_cli_error(text))
     except zs.CommandTimeout:
         raise HTTPException(504, detail="Timeout")
@@ -1514,11 +1521,12 @@ async def get_balance(session=Depends(get_session)):
     wn = session["wallet_name"]
     cached = wallet_cache.get(wn, {})
     cached_bal = cached.get("balance")
+    syncing = sync_progress.get(wn)
     if cached_bal and (time.time() - cached.get("last_sync", 0)) < 30:
-        return {"balance": cached_bal}
+        return {"balance": cached_bal, "syncing": syncing}
     if cached_bal:
         asyncio.create_task(sync_and_cache(wn))
-        return {"balance": cached_bal}
+        return {"balance": cached_bal, "syncing": syncing}
     if not ZINGO_SESSIONS:
         # A live session syncs on its own; waiting on `sync run` here would
         # hold the first balance behind the mixnet bootstrap.
@@ -1531,7 +1539,7 @@ async def get_balance(session=Depends(get_session)):
     wallet_cache.setdefault(wn, {})["balance"] = parsed
     wallet_cache[wn]["last_sync"] = time.time()
     asyncio.create_task(auto_shield(wn))
-    return {"balance": parsed}
+    return {"balance": parsed, "syncing": sync_progress.get(wn)}
 
 @app.get("/api/wallet/address")
 async def get_address(session=Depends(get_session)):
