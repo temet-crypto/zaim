@@ -11,7 +11,7 @@ import { useEffect, useRef, useState } from "react";
 import { T, F } from "./styles/maxpain.js";
 import { apiGet, apiPost } from "./api.js";
 import { assembleReply, buildRequest, hex, parseReplyMemo, TYPE, MEMO_MAX } from "./ai/protocol.js";
-import { clearPending, listPending, savePending } from "./ai/store.js";
+import { clearPending, listPending, savePending, saveConversation, listConversations } from "./ai/store.js";
 import { convHash, newConvSecret, ZERO_CONV } from "./ai/derive.js";
 import { QRCodeSVG } from "qrcode.react";
 
@@ -25,6 +25,31 @@ export default function AiTab({ aiReady, storeKey }) {
   const [quote, setQuote] = useState(null);
   const [balance, setBalance] = useState(null);
   const [msgs, setMsgs] = useState([]);          // {role, text, status}
+  // The chat outlives the screen: kept on this device in the encrypted
+  // conversation store (IndexedDB, AES-GCM under the AI store key), loaded
+  // when the tab opens and saved as it changes. Leaving the AI tab used to
+  // throw it away.
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    if (!storeKey) { setLoaded(true); return; }
+    let alive = true;
+    listConversations(storeKey)
+      .then((all) => {
+        const cur = all.find((c) => c.id === "current");
+        if (alive && cur && Array.isArray(cur.messages)) setMsgs(cur.messages);
+      })
+      .catch(() => {})
+      .finally(() => { if (alive) setLoaded(true); });
+    return () => { alive = false; };
+  }, [storeKey]);
+  useEffect(() => {
+    if (!loaded || !storeKey) return;
+    const t = setTimeout(() => {
+      const messages = msgs.map(({ role, text, status, reqId }) => ({ role, text, status, reqId }));
+      saveConversation({ id: "current", messages, updated: Date.now() }, storeKey).catch(() => {});
+    }, 300);
+    return () => clearTimeout(t);
+  }, [msgs, loaded, storeKey]);
   const [input, setInput] = useState("");
   const [convSecret, setConvSecret] = useState(() => newConvSecret());
   const [sheet, setSheet] = useState(false);
