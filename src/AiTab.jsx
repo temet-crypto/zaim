@@ -11,7 +11,7 @@ import { useEffect, useRef, useState } from "react";
 import { T, F } from "./styles/maxpain.js";
 import { apiGet, apiPost } from "./api.js";
 import { assembleReply, buildRequest, hex, parseReplyMemo, TYPE, MEMO_MAX } from "./ai/protocol.js";
-import { clearPending, listPending, savePending, saveConversation, listConversations } from "./ai/store.js";
+import { clearPending, listPending, savePending, saveConversation, listConversations, deleteConversation } from "./ai/store.js";
 import { convHash, newConvSecret, ZERO_CONV } from "./ai/derive.js";
 import { QRCodeSVG } from "qrcode.react";
 
@@ -21,37 +21,64 @@ const Lbl = ({ children, style }) => (
   <div className="mp-lbl-sm" style={style}>{children}</div>
 );
 
+const MAX_CHATS = 3;
+
 export default function AiTab({ aiReady, storeKey }) {
   const [quote, setQuote] = useState(null);
   const [balance, setBalance] = useState(null);
-  const [msgs, setMsgs] = useState([]);          // {role, text, status}
-  // The chat outlives the screen: kept on this device in the encrypted
-  // conversation store (IndexedDB, AES-GCM under the AI store key), loaded
-  // when the tab opens and saved as it changes. Leaving the AI tab used to
-  // throw it away.
+  // Up to MAX_CHATS chats, each with its own messages and its own
+  // conversation secret (so the AI only remembers within a chat). Kept on this
+  // device in the encrypted conversation store (IndexedDB, AES-GCM under the
+  // AI store key) and never sent anywhere.
+  const [chats, setChats] = useState([]);        // [{id, title, conv, messages, updated}]
+  const [currentId, setCurrentId] = useState(null);
   const [loaded, setLoaded] = useState(false);
+  const current = chats.find((c) => c.id === currentId) || null;
+  const msgs = current ? current.messages : [];
+  const convSecret = current ? hexToBytes(current.conv) : ZERO_CONV;
+  const titleOf = (messages) => {
+    const q = messages.find((m) => m.role === "user");
+    return q ? (q.text.length > 22 ? q.text.slice(0, 22) + "…" : q.text) : "New chat";
+  };
+  // Apply fn to one chat's messages. Asks and answers name their chat, so a
+  // reply still lands in the right one after you switch.
+  const setMsgsIn = (id, fn) => setChats((cs) => cs.map((c) => {
+    if (c.id !== id) return c;
+    const messages = typeof fn === "function" ? fn(c.messages) : fn;
+    return { ...c, messages, title: titleOf(messages), updated: Date.now() };
+  }));
+  const freshChat = () => ({ id: "c" + Date.now() + Math.random().toString(16).slice(2, 6),
+    title: "New chat", conv: hex(newConvSecret()), messages: [], updated: Date.now() });
+
   useEffect(() => {
-    if (!storeKey) { setLoaded(true); return; }
     let alive = true;
+    const done = (list) => {
+      if (!alive) return;
+      const kept = (list.length ? list : [freshChat()]).slice(0, MAX_CHATS);
+      setChats(kept);
+      setCurrentId(kept[0].id);
+      setLoaded(true);
+    };
+    if (!storeKey) { done([]); return; }
     listConversations(storeKey)
-      .then((all) => {
-        const cur = all.find((c) => c.id === "current");
-        if (alive && cur && Array.isArray(cur.messages)) setMsgs(cur.messages);
-      })
-      .catch(() => {})
-      .finally(() => { if (alive) setLoaded(true); });
+      .then((all) => done(all.filter((c) => Array.isArray(c.messages)).map((c) => ({
+        id: c.id, conv: c.conv || hex(newConvSecret()), messages: c.messages,
+        title: titleOf(c.messages), updated: c.updated || 0,
+      }))))
+      .catch(() => done([]));
     return () => { alive = false; };
   }, [storeKey]);
   useEffect(() => {
     if (!loaded || !storeKey) return;
     const t = setTimeout(() => {
-      const messages = msgs.map(({ role, text, status, reqId }) => ({ role, text, status, reqId }));
-      saveConversation({ id: "current", messages, updated: Date.now() }, storeKey).catch(() => {});
+      for (const c of chats) {
+        const messages = c.messages.map(({ role, text, status, reqId }) => ({ role, text, status, reqId }));
+        saveConversation({ id: c.id, conv: c.conv, messages, updated: c.updated }, storeKey).catch(() => {});
+      }
     }, 300);
     return () => clearTimeout(t);
-  }, [msgs, loaded, storeKey]);
+  }, [chats, loaded, storeKey]);
   const [input, setInput] = useState("");
-  const [convSecret, setConvSecret] = useState(() => newConvSecret());
   const [sheet, setSheet] = useState(false);
   const [topup, setTopup] = useState(false);
   // The AI account's own shielded address: funding it from any Zcash wallet
@@ -113,12 +140,21 @@ export default function AiTab({ aiReady, storeKey }) {
         try { text = await assembleReply(chunks, req.ephSk); } catch { continue; }
         if (text === null || !alive) continue;      // still missing chunks
         const kind = chunks[0].type;
-        setMsgs((prev) => {
-          const copy = prev.slice();
-          const slot = copy.find((x) => x.role === "ai" && x.reqId === req.id && x.status !== "answered");
-          if (slot) { slot.status = kind === TYPE.REP ? "answered" : "failed"; slot.text = text; }
-          else copy.push({ role: "ai", text, status: kind === TYPE.REP ? "answered" : "failed", reqId: req.id });
-          return copy;
+        const status = kind === TYPE.REP ? "answered" : "failed";
+        setChats((cs) => {
+          let found = false;
+          const next = cs.map((c) => {
+            const i = c.messages.findIndex((x) => x.role === "ai" && x.reqId === req.id && x.status !== "answered");
+            if (i < 0) return c;
+            found = true;
+            const messages = c.messages.slice();
+            messages[i] = { ...messages[i], status, text };
+            return { ...c, messages, updated: Date.now() };
+          });
+          if (found || !next.length) return next;
+          // Its chat is gone (or predates chats): show it in the newest one.
+          const [first, ...rest] = next;
+          return [{ ...first, messages: [...first.messages, { role: "ai", text, status, reqId: req.id }] }, ...rest];
         });
         req.ephSk.fill(0);
         await clearPending(req.id);   // only after it opened
@@ -137,10 +173,11 @@ export default function AiTab({ aiReady, storeKey }) {
     setSheet(false);
     setBusy(true);
     setInput("");
+    const chatId = currentId;
     const mine = { role: "user", text: q, status: "sending" };
     const reply = { role: "ai", text: "", status: "sending" };
-    setMsgs((m) => [...m, mine, reply]);
-    const set = (patch) => setMsgs((m) => m.map((x) => (x === reply ? Object.assign(reply, patch) && reply : x)).slice());
+    setMsgsIn(chatId, (m) => [...m, mine, reply]);
+    const set = (patch) => setMsgsIn(chatId, (m) => m.map((x) => (x === reply ? Object.assign(reply, patch) && reply : x)).slice());
 
     try {
       if (mock) {
@@ -183,10 +220,20 @@ export default function AiTab({ aiReady, storeKey }) {
   }
 
 
-  const newIdentity = () => {
-    setConvSecret(newConvSecret());
-    setMsgs([]);
-    say("Cleared");
+  const newChat = () => {
+    if (chats.length >= MAX_CHATS) return;
+    const c = freshChat();
+    setChats((cs) => [c, ...cs]);
+    setCurrentId(c.id);
+  };
+  const deleteChat = () => {
+    if (!current) return;
+    deleteConversation(current.id).catch(() => {});
+    const left = chats.filter((c) => c.id !== current.id);
+    const next = left.length ? left : [freshChat()];
+    setChats(next);
+    setCurrentId(next[0].id);
+    say("Chat deleted");
   };
 
   const st = { sending: T.blue, confirmed: T.teal, thinking: T.blue, answered: T.black, failed: T.signout };
@@ -197,8 +244,31 @@ export default function AiTab({ aiReady, storeKey }) {
         <div className="mp-title">AI</div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           {mock && <span className="mp-lbl-sm" style={{ color: T.blue }}>PREVIEW</span>}
-          <button className="mp-link" onClick={newIdentity}>CLEAR</button>
+          <button className="mp-link" onClick={deleteChat}>DELETE CHAT</button>
         </div>
+      </div>
+
+      {/* saved chats, newest first, up to three */}
+      <div style={{ display: "flex", borderBottom: `2px solid ${T.black}`, background: T.white }}>
+        {chats.map((c) => {
+          const on = c.id === currentId;
+          return (
+            <button key={c.id} onClick={() => setCurrentId(c.id)} title={c.title}
+              style={{ flex: 1, minWidth: 0, padding: "10px 8px", border: "none", borderRight: `2px solid ${T.black}`,
+                background: on ? T.black : T.white, color: on ? T.white : T.black, cursor: "pointer",
+                fontFamily: F.mono, fontSize: 11, letterSpacing: .5, textTransform: "uppercase",
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "left" }}>
+              {c.title}
+            </button>
+          );
+        })}
+        {chats.length < MAX_CHATS && (
+          <button onClick={newChat}
+            style={{ flex: "0 0 auto", padding: "10px 12px", border: "none", background: T.teal, color: T.black,
+              cursor: "pointer", fontFamily: F.mono, fontSize: 11, letterSpacing: .5 }}>
+            + NEW
+          </button>
+        )}
       </div>
 
       {closed && (
