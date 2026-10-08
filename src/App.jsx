@@ -329,6 +329,7 @@ function AuthScreen({ onAuth }) {
         </div>
       )}
       <div style={{ padding: "24px 16px 20px", display: "flex", flexDirection: "column", gap: 10 }}>
+        <a className="mp-btn blue" href="https://swap.zaimwallet.com" style={{ display: "block", textDecoration: "none" }}>ZAIM SWAP</a>
         <button className="mp-btn" onClick={() => setShowLog(true)} style={{ background: "none", color: T.black, border: `2px solid ${T.black}` }}>DEV LOG</button>
         <button className="mp-btn" onClick={() => setShowFeatures(true)} style={{ background: "none", color: T.blue, border: `2px solid ${T.blue}` }}>FEATURES</button>
       </div>
