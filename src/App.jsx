@@ -348,6 +348,53 @@ function ScreenHead({ title, meta, right }) {
   );
 }
 
+// ZAIM Swap (swap.zaimwallet.com) sends people here as zaimwallet.com/#swap to
+// pay a swap into their own wallet. NEAR Intents only pays Zcash to transparent
+// addresses, so the payout lands in the open and ZAIM shields it (auto_shield,
+// kept awake by the server's shield watch). The flag survives the sign in.
+const SHIELD_FLOOR_ZATS = 20000;   // the server's auto_shield floor
+const HANDOFF_KEY = "zaim_swap_handoff";
+try {
+  if (location.hash === "#swap") {
+    sessionStorage.setItem(HANDOFF_KEY, "1");
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+} catch (e) { }
+const handoffPending = () => { try { return sessionStorage.getItem(HANDOFF_KEY) === "1"; } catch (e) { return false; } };
+const clearHandoff = () => { try { sessionStorage.removeItem(HANDOFF_KEY); } catch (e) { } };
+
+function HandoffScreen({ onBack }) {
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState("");
+  const go = async () => {
+    setBusy(true); setErr("");
+    try {
+      const r = await API.post("/swap/handoff", {});
+      clearHandoff();
+      window.location.href = r.url;
+    } catch (e) { setErr(e.message || "Could not start the swap"); setBusy(false); }
+  };
+  const cancel = () => { clearHandoff(); onBack(); };
+  return (
+    <div className="mp-scroll">
+      <ScreenHead title="Swap" meta="ZAIM SWAP" />
+      <div className="mp-band">
+        <div className="mp-mid" style={{ marginBottom: 10 }}>PAY A SWAP INTO THIS WALLET</div>
+        <div className="mp-quip-sm">Swaps pay Zcash in the open, to this wallet's transparent address. ZAIM moves it into your shielded balance as soon as it lands.</div>
+      </div>
+      <div className="mp-band mp-band-w">
+        <div className="mp-lbl-sm" style={{ lineHeight: 1.7 }}>
+          KEEP ZAIM SIGNED IN FOR THE NEXT HOUR. IF YOU SIGN OUT FIRST, IT SHIELDS THE NEXT TIME YOU SIGN IN.
+        </div>
+      </div>
+      <div className="mp-band" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {err && <div style={{ fontFamily: F.mono, fontSize: 12, color: T.red, textTransform: "uppercase" }}>{err}</div>}
+        <button className="mp-btn blue display" disabled={busy} onClick={go}>{busy ? "OPENING…" : "CONTINUE TO ZAIM SWAP"}</button>
+        <button className="mp-btn ghost" disabled={busy} onClick={cancel}>CANCEL</button>
+      </div>
+    </div>
+  );
+}
+
 function HomeScreen({ onNav }) {
   const [balance, setBalance] = useState(null); const [address, setAddress] = useState(""); const [tAddr, setTAddr] = useState("");
   const [txs, setTxs] = useState([]); const [loading, setLoading] = useState(true); const [toast, setToast] = useState("");
@@ -377,7 +424,9 @@ function HomeScreen({ onNav }) {
   useEffect(() => { refresh(); }, [refresh]);
   // While the wallet is catching up, keep the number and the progress line fresh.
   useEffect(() => {
-    if (!balance || balance.syncing == null) return;
+    const b = balance && (balance.balance || balance);
+    const tz = b ? Number(b.transparent_balance || b.tbalance || 0) : 0;
+    if (!balance || (balance.syncing == null && !balance.swap_watch && tz < SHIELD_FLOOR_ZATS)) return;
     const t = setInterval(refresh, 30_000);
     return () => clearInterval(t);
   }, [balance, refresh]);
@@ -397,7 +446,7 @@ function HomeScreen({ onNav }) {
     return `${Math.floor(s / 3600)}h ago`;
   };
   const getBal = () => {
-    if (!balance) return { z: "0.0000", t: "0.0000", o: "0.0000", total: "0.0000", pending: 0 };
+    if (!balance) return { z: "0.0000", t: "0.0000", o: "0.0000", total: "0.0000", pending: 0, tZats: 0 };
     const b = balance.balance || balance;
     const toZec = v => ((typeof v === "number" ? v : parseInt(v) || 0) / 1e8).toFixed(4);
     const z = b.sapling_balance || b.spendable_sapling_balance || b.zbalance || b.verified_zbalance || 0;
@@ -408,7 +457,7 @@ function HomeScreen({ onNav }) {
     // The server sums every shielded pool; older servers only knew these two.
     const shielded = b.shielded_balance != null ? n(b.shielded_balance) : n(z) + n(o);
     const total = (shielded + n(t)) / 1e8;
-    return { z: toZec(shielded), t: toZec(t), o: toZec(o), total: total.toFixed(4), pending: n(b.pending_balance) };
+    return { z: toZec(shielded), t: toZec(t), o: toZec(o), total: total.toFixed(4), pending: n(b.pending_balance), tZats: n(t) };
   };
   const bal = getBal();
   const usd = price?.usd;
@@ -434,6 +483,15 @@ function HomeScreen({ onNav }) {
             CATCHING UP WITH THE NETWORK, {Math.floor(balance.syncing)}%. SENDING WORKS WHEN THIS FINISHES
           </div>
         )}
+        {bal.tZats >= SHIELD_FLOOR_ZATS ? (
+          <div className="mp-lbl-sm" style={{ marginTop: 10, color: T.blue }}>
+            {bal.t} ZEC ARRIVED IN THE OPEN. ZAIM SHIELDS IT IN A FEW MINUTES
+          </div>
+        ) : balance && balance.swap_watch ? (
+          <div className="mp-lbl-sm" style={{ marginTop: 10, color: T.blue }}>
+            WAITING FOR YOUR SWAP. ZAIM SHIELDS IT WHEN IT LANDS
+          </div>
+        ) : null}
         {bal.pending > 0 && (
           <div className="mp-lbl-sm" style={{ marginTop: 10, color: T.blue }}>
             {(bal.pending / 1e8).toFixed(4)} ZEC WAITING FOR CONFIRMATION
@@ -957,7 +1015,7 @@ function NavBar({ active, onNav }) {
 
 export default function ZaimApp() {
   const [authed, setAuthed] = useState(!!localStorage.getItem("zaim_token"));
-  const [screen, setScreen] = useState("home"); const [chatContact, setChatContact] = useState(null);
+  const [screen, setScreen] = useState(handoffPending() ? "handoff" : "home"); const [chatContact, setChatContact] = useState(null);
   const [tapCount, setTapCount] = useState(0);
   const handleLogoTap = () => { const n = tapCount + 1; setTapCount(n); if (n >= 5) { setScreen("admin"); setTapCount(0); } };
   // Recovered from sessionStorage so a refresh keeps decryption working for
@@ -982,7 +1040,8 @@ export default function ZaimApp() {
       case "home": return <HomeScreen onNav={nav} />;
       case "send": return <SendScreen onBack={() => setScreen("home")} />;
       case "request": return <RequestScreen onBack={() => setScreen("home")} />;
-      case "swap": return <ZaimSwap onBack={() => setScreen("home")} />;
+      case "swap": return <ZaimSwap onBack={() => setScreen("home")} onAnyCoin={() => setScreen("handoff")} />;
+      case "handoff": return <HandoffScreen onBack={() => setScreen("home")} />;
       case "messages": return <MessengerScreen onNav={nav} />;
       case "chat": return chatContact ? <ChatScreen contact={chatContact} onBack={() => setScreen("messages")} /> : null;
       case "geo": return <ZAIMGeoVault />;
@@ -994,13 +1053,13 @@ export default function ZaimApp() {
       default: return <HomeScreen onNav={nav} />;
     }
   };
-  const showNav = authed && !["send", "request", "swap", "chat", "admin"].includes(screen);
+  const showNav = authed && !["send", "request", "swap", "handoff", "chat", "admin"].includes(screen);
   return (
     <div className="mp mp-shell">
       <style>{MAXPAIN_CSS}</style>
       <div className="mp-frame">
         {!authed
-          ? <AuthScreen onAuth={() => setAuthed(true)} />
+          ? <AuthScreen onAuth={() => { setAuthed(true); if (handoffPending()) setScreen("handoff"); }} />
           : <>{render()}{showNav && <NavBar active={screen} onNav={nav} />}</>}
       </div>
     </div>

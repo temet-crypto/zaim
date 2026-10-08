@@ -936,6 +936,7 @@ async def startup_sync():
 async def lifespan(app: FastAPI):
     load_sessions()
     load_swaps()
+    load_shield_watch()
     load_vaults()
     load_wallet_servers()
     load_fee_totals()
@@ -948,7 +949,9 @@ async def lifespan(app: FastAPI):
     migration_task = asyncio.create_task(periodic_migration())
     spend_lock_task = asyncio.create_task(periodic_spend_lock())
     reap_task = asyncio.create_task(periodic_reap())
+    watch_task = asyncio.create_task(periodic_shield_watch())
     yield
+    watch_task.cancel()
     reap_task.cancel()
     migration_task.cancel()
     spend_lock_task.cancel()
@@ -1522,11 +1525,12 @@ async def get_balance(session=Depends(get_session)):
     cached = wallet_cache.get(wn, {})
     cached_bal = cached.get("balance")
     syncing = sync_progress.get(wn)
+    watching = wn in shield_watch
     if cached_bal and (time.time() - cached.get("last_sync", 0)) < 30:
-        return {"balance": cached_bal, "syncing": syncing}
+        return {"balance": cached_bal, "syncing": syncing, "swap_watch": watching}
     if cached_bal:
         asyncio.create_task(sync_and_cache(wn))
-        return {"balance": cached_bal, "syncing": syncing}
+        return {"balance": cached_bal, "syncing": syncing, "swap_watch": watching}
     if not ZINGO_SESSIONS:
         # A live session syncs on its own; waiting on `sync run` here would
         # hold the first balance behind the mixnet bootstrap.
@@ -1539,7 +1543,7 @@ async def get_balance(session=Depends(get_session)):
     wallet_cache.setdefault(wn, {})["balance"] = parsed
     wallet_cache[wn]["last_sync"] = time.time()
     asyncio.create_task(auto_shield(wn))
-    return {"balance": parsed, "syncing": sync_progress.get(wn)}
+    return {"balance": parsed, "syncing": sync_progress.get(wn), "swap_watch": watching}
 
 @app.get("/api/wallet/address")
 async def get_address(session=Depends(get_session)):
@@ -2708,6 +2712,96 @@ def _quote_view(q, fallback_deadline):
         "time_estimate_sec": q.get("timeEstimate"),
         "deadline": q.get("deadline") or fallback_deadline,
     }
+
+# ── ZAIM Swap handoff ────────────────────────────────────────────────────────
+# ZAIM Swap (swap.zaimwallet.com, its own Vercel site, no accounts) can pay a
+# swap into this wallet. NEAR Intents only pays Zcash to TRANSPARENT addresses,
+# so the payout lands on the wallet's t-address in the open, and auto_shield
+# moves it into the shielded pool. The handoff hands the swap site that
+# t-address and starts a watch: for up to SHIELD_WATCH_MIN the wallet counts as
+# in use, so it keeps syncing, stays unsealed and keeps its engine, even with
+# the tab closed. The watch ends when the payout has been shielded, when it
+# times out, or when the wallet seals (sign out). ZAIM never holds anyone
+# else's coins: the payout goes to the user's own wallet.
+SWAP_SITE = os.getenv("ZAIM_SWAP_SITE", "https://swap.zaimwallet.com").rstrip("/")
+SHIELD_WATCH_MIN = int(os.getenv("ZAIM_SHIELD_WATCH_MIN", "60"))
+SHIELD_FLOOR_ZATS = 20000   # auto_shield's floor: less than this is not worth a shield fee
+shield_watch = {}           # wallet name -> {"until": ts, "seen": bool}
+SHIELD_WATCH_FILE = os.path.join(WDIR, "_shield_watch.json")
+
+def save_shield_watch():
+    try:
+        _atomic_write_json(SHIELD_WATCH_FILE, shield_watch)
+    except Exception as e:
+        print(f"[shield-watch] save: {e!r}"[:200], flush=True)
+
+def load_shield_watch():
+    try:
+        with open(SHIELD_WATCH_FILE) as f:
+            d = json.load(f)
+        if isinstance(d, dict):
+            shield_watch.update({k: v for k, v in d.items() if isinstance(v, dict) and "until" in v})
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[shield-watch] load: {e!r}"[:200], flush=True)
+
+def _transparent_zats(wn):
+    bal = wallet_cache.get(wn, {}).get("balance") or {}
+    v = bal.get("transparent_balance", bal.get("tbalance", 0))
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+def shield_watch_tick(now):
+    """One pass of the watch. Returns the wallets still being watched."""
+    changed = False
+    for wn, w in list(shield_watch.items()):
+        t = _transparent_zats(wn)
+        if t >= SHIELD_FLOOR_ZATS and not w.get("seen"):
+            w["seen"] = True          # the payout is here; done once it is shielded
+            changed = True
+        shielded = w.get("seen") and t < SHIELD_FLOOR_ZATS
+        if now > w.get("until", 0) or shielded or not os.path.isdir(os.path.join(WDIR, wn)):
+            shield_watch.pop(wn, None)
+            changed = True
+            print(f"[shield-watch] {wn} done: {'shielded' if shielded else 'ended'}", flush=True)
+            continue
+        wallet_activity[wn] = now     # counts as in use: keeps syncing, unsealed, engine up
+    if changed:
+        save_shield_watch()
+    return set(shield_watch)
+
+async def periodic_shield_watch():
+    while True:
+        await asyncio.sleep(60)
+        try:
+            shield_watch_tick(time.time())
+        except Exception as e:
+            print(f"[shield-watch] {e!r}"[:300], flush=True)
+
+@app.post("/api/swap/handoff")
+async def swap_handoff(session=Depends(get_session)):
+    wn = session["wallet_name"]
+    if session.get("view_only") or wn.startswith("zv_"):
+        raise HTTPException(400, detail="Sign in with your seed so ZAIM can shield the swap when it lands")
+    t_addr = session.get("t_address", "")
+    if not t_addr:
+        _, t_addr, _ = await _read_addresses(wn)
+        if t_addr:
+            session["t_address"] = t_addr
+            save_sessions()
+    if not t_addr or not t_addr.startswith(("t1", "t3", "tm")):
+        raise HTTPException(400, detail="The wallet has no transparent address yet. Try again in a minute")
+    until = time.time() + SHIELD_WATCH_MIN * 60
+    shield_watch[wn] = {"until": until, "seen": _transparent_zats(wn) >= SHIELD_FLOOR_ZATS}
+    save_shield_watch()
+    wallet_activity[wn] = time.time()
+    # The address rides in the URL fragment, which browsers never send to a
+    # server, so it stays out of the swap site's request logs.
+    return {"t_address": t_addr, "watch_minutes": SHIELD_WATCH_MIN,
+            "url": f"{SWAP_SITE}/#get=ZEC&addr={t_addr}&zaim=1"}
 
 @app.get("/api/swap/assets")
 async def swap_assets(session=Depends(get_session)):

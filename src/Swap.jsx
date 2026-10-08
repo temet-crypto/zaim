@@ -69,7 +69,7 @@ function QuotePanel({ quote }) {
   );
 }
 
-export default function ZaimSwap({ onBack }) {
+export default function ZaimSwap({ onBack, onAnyCoin }) {
   const [mode, setMode] = useState("buy");
   const [asset, setAsset] = useState("SOL");
   const [amount, setAmount] = useState("");
@@ -264,6 +264,16 @@ export default function ZaimSwap({ onBack }) {
           </div>
         ))}
       </div>
+
+      {onAnyCoin && mode === "buy" && (
+        <div className="mp-action" onClick={onAnyCoin}>
+          <div>
+            <div className="mp-action-title">Any coin, any chain</div>
+            <div className="mp-action-sub">30+ CHAINS ON ZAIM SWAP. LANDS HERE AND GETS SHIELDED</div>
+          </div>
+          <div style={{ fontFamily: F.display, fontWeight: 800, fontSize: 22 }}>→</div>
+        </div>
+      )}
 
       <div className="mp-section">{mode === "buy" ? "PAY WITH" : "RECEIVE"}</div>
       <div style={{ display: "flex", borderBottom: `2px solid ${T.black}` }}>
